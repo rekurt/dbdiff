@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use dbdiff::cli::{Args, OutputFormat};
+use dbdiff::config;
 use dbdiff::diff::diff_schemas;
 use dbdiff::loader;
 use dbdiff::migration::generate_migration;
@@ -25,7 +26,12 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    let (left, right) = tokio::try_join!(
+    let cfg = config::load_config(&args.config).map_err(|e| {
+        eprintln!("Error: {e}");
+        ExitCode::from(2)
+    })?;
+
+    let (mut left, mut right) = tokio::try_join!(
         loader::load_schema(&args.source),
         loader::load_schema(target_source),
     )
@@ -33,6 +39,9 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         eprintln!("Error: {e}");
         ExitCode::from(2)
     })?;
+
+    config::filter::apply_ignore(&mut left, &cfg.ignore);
+    config::filter::apply_ignore(&mut right, &cfg.ignore);
 
     let diff = diff_schemas(&left, &right);
     let statements = generate_migration(&diff);

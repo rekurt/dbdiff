@@ -35,6 +35,10 @@ pub struct Args {
     /// Output format
     #[arg(long, value_enum, default_value = "pretty")]
     pub format: OutputFormat,
+
+    /// Path to config file
+    #[arg(long, value_name = "FILE", default_value = ".dbdiff.yml")]
+    pub config: String,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]

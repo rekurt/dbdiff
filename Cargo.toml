@@ -1,6 +1,6 @@
 [package]
 name = "dbdiff"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["rekurt"]
@@ -25,10 +25,18 @@ exclude = [
 name = "dbdiff"
 path = "src/main.rs"
 
+[features]
+default = ["postgres", "mysql", "sqlite"]
+postgres = ["dep:tokio-postgres"]
+mysql = ["dep:mysql_async"]
+sqlite = ["dep:rusqlite"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", optional = true }
+mysql_async = { version = "0.34", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 colored = "3"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
