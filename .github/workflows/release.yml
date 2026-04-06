@@ -71,7 +71,7 @@ jobs:
           7z a ../../../dbdiff-${{ matrix.target }}.zip dbdiff.exe
           cd -
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dbdiff-${{ matrix.target }}
           path: dbdiff-${{ matrix.target }}.*
