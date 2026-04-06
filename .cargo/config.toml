@@ -1,0 +1,3 @@
+[build]
+# Uncomment for faster dev builds on Linux with mold linker:
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]

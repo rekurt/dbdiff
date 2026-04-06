@@ -1,0 +1,24 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# OS
+Thumbs.db
