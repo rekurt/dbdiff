@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-06
+
+### Added
+
+- `.dbdiff.yml` configuration file with table/column ignore patterns
+- `--config <FILE>` CLI flag (defaults to `.dbdiff.yml`)
+- MySQL/MariaDB schema introspection via `information_schema`
+- SQLite schema introspection via `PRAGMA` commands
+- Cargo feature flags: `postgres`, `mysql`, `sqlite` (all enabled by default)
+- Column ignore patterns: `*.column`, `table.*`, `table.column`
+
+### Changed
+
+- Database backends are now optional via feature flags
+- `tokio-postgres` is now an optional dependency (feature `postgres`)
+
 ## [0.1.0] - 2024-04-06
 
 ### Added
@@ -24,5 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Locking warnings for dangerous ALTER operations
 - `.dbdiff.yml` configuration file support (ignore tables/columns)
 
-[Unreleased]: https://github.com/rekurt/dbdiff/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/rekurt/dbdiff/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rekurt/dbdiff/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rekurt/dbdiff/releases/tag/v0.1.0

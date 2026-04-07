@@ -3,8 +3,10 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use dbdiff::cli::{Args, OutputFormat};
+use dbdiff::config;
 use dbdiff::diff::diff_schemas;
 use dbdiff::loader;
+use dbdiff::loader::SqlDialect;
 use dbdiff::migration::generate_migration;
 use dbdiff::output;
 
@@ -25,7 +27,12 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    let (left, right) = tokio::try_join!(
+    let cfg = config::load_config(&args.config).map_err(|e| {
+        eprintln!("Error: {e}");
+        ExitCode::from(2)
+    })?;
+
+    let (mut left, mut right) = tokio::try_join!(
         loader::load_schema(&args.source),
         loader::load_schema(target_source),
     )
@@ -34,10 +41,30 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    let diff = diff_schemas(&left, &right);
-    let statements = generate_migration(&diff);
+    config::filter::apply_ignore(&mut left.schema, &cfg.ignore);
+    config::filter::apply_ignore(&mut right.schema, &cfg.ignore);
 
-    match args.format {
+    // Apply config color setting (CLI could override later with --color flag)
+    if let Some(false) = cfg.output.color {
+        colored::control::set_override(false);
+    }
+
+    let diff = diff_schemas(&left.schema, &right.schema);
+    let migration_dialect = match (left.dialect, right.dialect) {
+        (SqlDialect::SqlFile, other) | (other, SqlDialect::SqlFile) => other,
+        (l, r) if l == r => l,
+        (l, r) => {
+            eprintln!(
+                "Error: Cannot generate migration for mixed backends ({l:?} vs {r:?}). \
+                 Compare like-for-like backends or use a .sql file for one side."
+            );
+            return Err(ExitCode::from(2));
+        }
+    };
+    let statements = generate_migration(&diff, migration_dialect);
+    let format = args.resolve_format(&cfg.output.format);
+
+    match format {
         OutputFormat::Pretty => {
             output::print_diff(&diff);
             if !statements.is_empty() {

@@ -83,6 +83,18 @@ dbdiff postgres://user:pass@prod-host/myapp --schema ./schema.sql
 
 Useful during code review — verify that a migration file actually matches what's in production.
 
+### Compare MySQL databases
+
+```bash
+dbdiff mysql://user:pass@prod-host/myapp mysql://user:pass@staging-host/myapp
+```
+
+### Compare a SQLite database against a schema file
+
+```bash
+dbdiff myapp.db --schema ./schema.sql
+```
+
 ### Save the generated migration to a file
 
 ```bash
@@ -97,6 +109,12 @@ dbdiff postgres://prod/myapp postgres://staging/myapp --ci
 ```
 
 Returns exit code `0` if schemas match, `1` if they differ. Use this in GitHub Actions, GitLab CI, or any pipeline.
+
+### Use a custom config file
+
+```bash
+dbdiff postgres://prod/myapp postgres://staging/myapp --config ./my-config.yml
+```
 
 ### JSON output for custom tooling
 
@@ -184,8 +202,24 @@ output:
 | Database        | Status     | Version |
 |-----------------|-----------|---------|
 | PostgreSQL      | ✅ stable  | 12+     |
-| MySQL / MariaDB | 🚧 v0.2    | 8.0+    |
-| SQLite          | 🗓 v0.3    | 3.x     |
+| MySQL / MariaDB | ✅ stable  | 8.0+    |
+| SQLite          | ✅ stable  | 3.x     |
+
+---
+
+## Feature flags
+
+Database backends are optional and can be toggled via Cargo features:
+
+```bash
+# Install with only PostgreSQL support
+cargo install dbdiff --no-default-features --features postgres
+
+# Install with PostgreSQL and SQLite only
+cargo install dbdiff --no-default-features --features postgres,sqlite
+```
+
+All backends (`postgres`, `mysql`, `sqlite`) are enabled by default.
 
 ---
 
@@ -219,13 +253,19 @@ src/
   diff.rs          Schema comparison engine
   migration.rs     SQL migration generator
   output.rs        Terminal rendering (colored diff)
+  config/
+    mod.rs         Config file parsing (.dbdiff.yml)
+    filter.rs      Schema filtering (ignore tables/columns)
   loader/
     mod.rs         Source dispatch logic
     postgres.rs    PostgreSQL introspection
+    mysql.rs       MySQL / MariaDB introspection
+    sqlite.rs      SQLite introspection
     sqlfile.rs     .sql file parser
 tests/
   cli.rs           Integration tests
-  fixtures/        SQL test schemas
+  config.rs        Config integration tests
+  fixtures/        SQL test schemas + config fixtures
 ```
 
 ---

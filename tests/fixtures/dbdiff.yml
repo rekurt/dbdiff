@@ -1,0 +1,8 @@
+ignore:
+  tables:
+    - audit_log
+  columns:
+    - "*.created_at"
+output:
+  format: pretty
+  color: true
