@@ -41,7 +41,8 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: format!(
                     "ALTER TABLE {} DROP COLUMN {};",
-                    table_diff.table_name, col.name
+                    quote_ident(&table_diff.table_name, dialect),
+                    quote_ident(&col.name, dialect)
                 ),
                 warnings,
             });
@@ -51,7 +52,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     // Phase 3: DROP TABLEs
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
-            sql: format!("DROP TABLE {};", table.name),
+            sql: format!("DROP TABLE {};", quote_ident(&table.name, dialect)),
             warnings: vec![format!(
                 "Dropping table '{}' will permanently delete all data.",
                 table.name
@@ -62,14 +63,14 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     // Phase 4: CREATE TABLEs
     for table in &diff.added_tables {
         statements.push(MigrationStatement {
-            sql: create_table_sql(table),
+            sql: create_table_sql(table, dialect),
             warnings: Vec::new(),
         });
 
         // Indexes for new table
         for idx in table.indexes.values() {
             statements.push(MigrationStatement {
-                sql: create_index_sql(idx),
+                sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
             });
         }
@@ -82,8 +83,8 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: format!(
                     "ALTER TABLE {} ADD COLUMN {};",
-                    table_diff.table_name,
-                    col.definition()
+                    quote_ident(&table_diff.table_name, dialect),
+                    column_definition_sql(col, dialect)
                 ),
                 warnings,
             });
@@ -100,7 +101,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.added_indexes {
             statements.push(MigrationStatement {
-                sql: create_index_sql(idx),
+                sql: create_index_sql(idx, dialect),
                 warnings: vec![
                     "Consider using CREATE INDEX CONCURRENTLY to avoid locking the table."
                         .to_string(),
@@ -119,28 +120,61 @@ pub struct MigrationStatement {
     pub warnings: Vec<String>,
 }
 
-fn create_table_sql(table: &Table) -> String {
+fn quote_ident(ident: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::MySql => format!("`{}`", ident.replace('`', "``")),
+        _ => format!("\"{}\"", ident.replace('"', "\"\"")),
+    }
+}
+
+fn column_definition_sql(col: &Column, dialect: SqlDialect) -> String {
+    let mut def = format!("{} {}", quote_ident(&col.name, dialect), col.data_type);
+    if !col.is_nullable {
+        def.push_str(" NOT NULL");
+    }
+    if let Some(ref default) = col.default {
+        def.push_str(&format!(" DEFAULT {default}"));
+    }
+    def
+}
+
+fn create_table_sql(table: &Table, dialect: SqlDialect) -> String {
     let columns: Vec<String> = table
         .columns
         .values()
-        .map(|c| format!("    {}", c.definition()))
+        .map(|c| format!("    {}", column_definition_sql(c, dialect)))
         .collect();
-    format!("CREATE TABLE {} (\n{}\n);", table.name, columns.join(",\n"))
+    format!(
+        "CREATE TABLE {} (\n{}\n);",
+        quote_ident(&table.name, dialect),
+        columns.join(",\n")
+    )
 }
 
-fn create_index_sql(idx: &Index) -> String {
+fn create_index_sql(idx: &Index, dialect: SqlDialect) -> String {
     let unique = if idx.is_unique { "UNIQUE " } else { "" };
-    let cols = idx.columns.join(", ");
+    let cols = idx
+        .columns
+        .iter()
+        .map(|c| quote_ident(c, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "CREATE {unique}INDEX {} ON {}({});",
-        idx.name, idx.table_name, cols
+        quote_ident(&idx.name, dialect),
+        quote_ident(&idx.table_name, dialect),
+        cols
     )
 }
 
 fn drop_index_sql(idx: &Index, dialect: SqlDialect) -> String {
     match dialect {
-        SqlDialect::MySql => format!("DROP INDEX {} ON {};", idx.name, idx.table_name),
-        _ => format!("DROP INDEX {};", idx.name),
+        SqlDialect::MySql => format!(
+            "DROP INDEX {} ON {};",
+            quote_ident(&idx.name, dialect),
+            quote_ident(&idx.table_name, dialect)
+        ),
+        _ => format!("DROP INDEX {};", quote_ident(&idx.name, dialect)),
     }
 }
 
@@ -177,7 +211,11 @@ fn generate_column_alterations(
         if old.data_type != new.data_type {
             match dialect {
                 SqlDialect::MySql => stmts.push(MigrationStatement {
-                    sql: format!("ALTER TABLE {table} MODIFY COLUMN {};", new.definition()),
+                    sql: format!(
+                        "ALTER TABLE {} MODIFY COLUMN {};",
+                        quote_ident(table, dialect),
+                        column_definition_sql(new, dialect)
+                    ),
                     warnings: vec![format!(
                         "Changing column type from '{}' to '{}' may require a table rewrite \
                          and table lock.",
@@ -186,8 +224,9 @@ fn generate_column_alterations(
                 }),
                 SqlDialect::Sqlite => stmts.push(MigrationStatement {
                     sql: format!(
-                        "-- manual migration required for type change on {table}.{}",
-                        new.name
+                        "-- manual migration required for type change on {}.{}",
+                        quote_ident(table, dialect),
+                        quote_ident(&new.name, dialect)
                     ),
                     warnings: vec![format!(
                         "SQLite does not support ALTER COLUMN TYPE directly for '{}'. \
@@ -197,8 +236,10 @@ fn generate_column_alterations(
                 }),
                 _ => stmts.push(MigrationStatement {
                     sql: format!(
-                        "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
-                        new.name, new.data_type
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
+                        quote_ident(table, dialect),
+                        quote_ident(&new.name, dialect),
+                        new.data_type
                     ),
                     warnings: vec![format!(
                         "Changing column type from '{}' to '{}' may require a table rewrite \
@@ -227,15 +268,20 @@ fn generate_column_alterations(
                         )
                     };
                     stmts.push(MigrationStatement {
-                        sql: format!("ALTER TABLE {table} MODIFY COLUMN {};", new.definition()),
+                        sql: format!(
+                            "ALTER TABLE {} MODIFY COLUMN {};",
+                            quote_ident(table, dialect),
+                            column_definition_sql(new, dialect)
+                        ),
                         warnings: vec![warning],
                     });
                 }
                 SqlDialect::Sqlite => {
                     stmts.push(MigrationStatement {
                         sql: format!(
-                            "-- manual migration required for nullability change on {table}.{}",
-                            new.name
+                            "-- manual migration required for nullability change on {}.{}",
+                            quote_ident(table, dialect),
+                            quote_ident(&new.name, dialect)
                         ),
                         warnings: vec![format!(
                             "SQLite does not support ALTER COLUMN nullability directly for '{}'. \
@@ -248,16 +294,18 @@ fn generate_column_alterations(
                     if new.is_nullable {
                         stmts.push(MigrationStatement {
                             sql: format!(
-                                "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;",
-                                new.name
+                                "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL;",
+                                quote_ident(table, dialect),
+                                quote_ident(&new.name, dialect)
                             ),
                             warnings: Vec::new(),
                         });
                     } else {
                         stmts.push(MigrationStatement {
                             sql: format!(
-                                "ALTER TABLE {table} ALTER COLUMN {} SET NOT NULL;",
-                                new.name
+                                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;",
+                                quote_ident(table, dialect),
+                                quote_ident(&new.name, dialect)
                             ),
                             warnings: vec![format!(
                                 "SET NOT NULL on '{}' will scan the entire table to verify no NULLs exist. \
@@ -276,8 +324,9 @@ fn generate_column_alterations(
                 Some(default) => {
                     stmts.push(MigrationStatement {
                         sql: format!(
-                            "ALTER TABLE {table} ALTER COLUMN {} SET DEFAULT {default};",
-                            new.name
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {default};",
+                            quote_ident(table, dialect),
+                            quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
                     });
@@ -285,8 +334,9 @@ fn generate_column_alterations(
                 None => {
                     stmts.push(MigrationStatement {
                         sql: format!(
-                            "ALTER TABLE {table} ALTER COLUMN {} DROP DEFAULT;",
-                            new.name
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
+                            quote_ident(table, dialect),
+                            quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
                     });
@@ -335,7 +385,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE users ADD COLUMN email varchar(255) NOT NULL;"
+            "ALTER TABLE \"users\" ADD COLUMN \"email\" varchar(255) NOT NULL;"
         );
         assert!(!stmts[0].warnings.is_empty()); // NOT NULL without DEFAULT warning
     }
@@ -360,7 +410,10 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
+        assert_eq!(
+            stmts[0].sql,
+            "ALTER TABLE \"users\" DROP COLUMN \"old_field\";"
+        );
         assert!(stmts[0].warnings[0].contains("destructive"));
     }
 
@@ -380,9 +433,9 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].sql.starts_with("CREATE TABLE orders"));
-        assert!(stmts[0].sql.contains("id serial NOT NULL"));
-        assert!(stmts[0].sql.contains("total numeric(10,2) NOT NULL"));
+        assert!(stmts[0].sql.starts_with("CREATE TABLE \"orders\""));
+        assert!(stmts[0].sql.contains("\"id\" serial NOT NULL"));
+        assert!(stmts[0].sql.contains("\"total\" numeric(10,2) NOT NULL"));
     }
 
     #[test]
@@ -405,7 +458,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE users ALTER COLUMN email TYPE varchar(255);"
+            "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE varchar(255);"
         );
     }
 
@@ -436,7 +489,10 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
+        assert_eq!(
+            stmts[0].sql,
+            "CREATE INDEX \"idx_orders_id\" ON \"orders\"(\"id\");"
+        );
     }
 
     #[test]
@@ -519,7 +575,7 @@ mod tests {
         let diff = diff_schemas(&left, &right);
         let stmts = generate_migration(&diff, SqlDialect::MySql);
 
-        assert_eq!(stmts[0].sql, "DROP INDEX idx_orders_id ON orders;");
+        assert_eq!(stmts[0].sql, "DROP INDEX `idx_orders_id` ON `orders`;");
     }
 
     #[test]
@@ -563,7 +619,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE users MODIFY COLUMN email varchar(255) NOT NULL;"
+            "ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) NOT NULL;"
         );
     }
 
@@ -589,5 +645,27 @@ mod tests {
             .sql
             .starts_with("-- manual migration required for nullability change"));
         assert!(stmts[0].warnings[0].contains("does not support ALTER COLUMN nullability"));
+    }
+
+    #[test]
+    fn postgres_identifiers_are_quoted_and_escaped() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("users\"; DROP TABLE payments; --");
+        t.columns.insert(
+            "email\"; DELETE FROM users; --".into(),
+            col("email\"; DELETE FROM users; --", "text", true, None),
+        );
+        right.tables.insert(t.name.clone(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+
+        assert!(stmts[0]
+            .sql
+            .starts_with("CREATE TABLE \"users\"\"; DROP TABLE payments; --\""));
+        assert!(stmts[0]
+            .sql
+            .contains("\"email\"\"; DELETE FROM users; --\" text"));
     }
 }
