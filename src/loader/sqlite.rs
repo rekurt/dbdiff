@@ -88,8 +88,13 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
         .collect::<Result<_, _>>()?;
 
     for (index_name, is_unique, origin) in indexes {
-        // Skip auto-generated primary key indexes
-        if origin == "pk" {
+        // Skip auto-generated indexes for PRIMARY KEY / UNIQUE constraints.
+        // SQLite marks these with origin:
+        // - "pk": PRIMARY KEY
+        // - "u": UNIQUE constraint
+        // These are internal implementation details (often sqlite_autoindex_*),
+        // not user-managed indexes we should diff/migrate directly.
+        if matches!(origin.as_str(), "pk" | "u") {
             continue;
         }
 
@@ -262,5 +267,28 @@ mod tests {
 
         // Expression index is skipped to avoid producing empty-column SQL definitions.
         assert!(!table.indexes.contains_key("idx_items_lower_name"));
+    }
+
+    #[test]
+    fn unique_constraint_autoindexes_are_skipped() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY NOT NULL,
+                email TEXT NOT NULL UNIQUE
+            );
+            CREATE INDEX idx_users_email ON users(email);",
+        )
+        .unwrap();
+
+        let mut table = Table::new("users");
+        load_indexes(&conn, "users", &mut table).unwrap();
+
+        assert!(table.indexes.contains_key("idx_users_email"));
+        assert_eq!(table.indexes.len(), 1);
+        assert!(!table
+            .indexes
+            .keys()
+            .any(|index_name| index_name.starts_with("sqlite_autoindex_")));
     }
 }

@@ -211,26 +211,62 @@ fn generate_column_alterations(
 
         // Nullability change
         if old.is_nullable != new.is_nullable {
-            if new.is_nullable {
-                stmts.push(MigrationStatement {
-                    sql: format!(
-                        "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;",
-                        new.name
-                    ),
-                    warnings: Vec::new(),
-                });
-            } else {
-                stmts.push(MigrationStatement {
-                    sql: format!(
-                        "ALTER TABLE {table} ALTER COLUMN {} SET NOT NULL;",
-                        new.name
-                    ),
-                    warnings: vec![format!(
-                        "SET NOT NULL on '{}' will scan the entire table to verify no NULLs exist. \
-                         This acquires AccessExclusiveLock.",
-                        new.name
-                    )],
-                });
+            match dialect {
+                SqlDialect::MySql => {
+                    let warning = if new.is_nullable {
+                        format!(
+                            "Changing '{}' to NULL via MODIFY COLUMN may rebuild the table depending \
+                             on MySQL/MariaDB version and storage engine.",
+                            new.name
+                        )
+                    } else {
+                        format!(
+                            "Changing '{}' to NOT NULL via MODIFY COLUMN can fail if existing rows \
+                             contain NULL values.",
+                            new.name
+                        )
+                    };
+                    stmts.push(MigrationStatement {
+                        sql: format!("ALTER TABLE {table} MODIFY COLUMN {};", new.definition()),
+                        warnings: vec![warning],
+                    });
+                }
+                SqlDialect::Sqlite => {
+                    stmts.push(MigrationStatement {
+                        sql: format!(
+                            "-- manual migration required for nullability change on {table}.{}",
+                            new.name
+                        ),
+                        warnings: vec![format!(
+                            "SQLite does not support ALTER COLUMN nullability directly for '{}'. \
+                             Recreate table '{table}' with the desired column definition.",
+                            new.name
+                        )],
+                    });
+                }
+                _ => {
+                    if new.is_nullable {
+                        stmts.push(MigrationStatement {
+                            sql: format!(
+                                "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;",
+                                new.name
+                            ),
+                            warnings: Vec::new(),
+                        });
+                    } else {
+                        stmts.push(MigrationStatement {
+                            sql: format!(
+                                "ALTER TABLE {table} ALTER COLUMN {} SET NOT NULL;",
+                                new.name
+                            ),
+                            warnings: vec![format!(
+                                "SET NOT NULL on '{}' will scan the entire table to verify no NULLs exist. \
+                                 This acquires AccessExclusiveLock.",
+                                new.name
+                            )],
+                        });
+                    }
+                }
             }
         }
 
@@ -505,5 +541,53 @@ mod tests {
 
         assert!(stmts[0].sql.starts_with("-- manual migration required"));
         assert!(stmts[0].warnings[0].contains("does not support ALTER COLUMN TYPE"));
+    }
+
+    #[test]
+    fn mysql_nullability_change_uses_modify_column() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(
+            stmts[0].sql,
+            "ALTER TABLE users MODIFY COLUMN email varchar(255) NOT NULL;"
+        );
+    }
+
+    #[test]
+    fn sqlite_nullability_change_generates_manual_warning() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Sqlite);
+
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0]
+            .sql
+            .starts_with("-- manual migration required for nullability change"));
+        assert!(stmts[0].warnings[0].contains("does not support ALTER COLUMN nullability"));
     }
 }
