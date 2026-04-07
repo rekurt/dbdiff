@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use std::path::Path;
 
 use crate::error::DbDiffError;
 use crate::model::{Column, Index, Schema, Table};
@@ -9,6 +10,11 @@ use crate::model::{Column, Index, Schema, Table};
 /// This is a synchronous function — call via `spawn_blocking` from async contexts.
 pub fn load(source: &str) -> Result<Schema, DbDiffError> {
     let path = source.strip_prefix("sqlite://").unwrap_or(source);
+    if !Path::new(path).exists() {
+        return Err(DbDiffError::InvalidArg(format!(
+            "SQLite source file does not exist: {path}"
+        )));
+    }
     let conn = Connection::open(path)?;
 
     let mut schema = Schema::new();
@@ -137,10 +143,7 @@ fn normalize_type(sqlite_type: &str) -> String {
 
 /// Clean up SQLite default values.
 fn normalize_default(default: &str) -> String {
-    // Remove surrounding quotes if present
-    if default.starts_with('\'') && default.ends_with('\'') && default.len() > 2 {
-        return default[1..default.len() - 1].to_string();
-    }
+    // Preserve literal text exactly so downstream SQL rendering keeps valid quoting.
     default.to_string()
 }
 
@@ -164,9 +167,30 @@ mod tests {
     #[test]
     fn test_normalize_default() {
         assert_eq!(normalize_default("0"), "0");
-        assert_eq!(normalize_default("'hello'"), "hello");
+        assert_eq!(normalize_default("'hello'"), "'hello'");
         assert_eq!(normalize_default("NULL"), "NULL");
         assert_eq!(normalize_default("CURRENT_TIMESTAMP"), "CURRENT_TIMESTAMP");
+    }
+
+    #[test]
+    fn load_fails_when_sqlite_file_is_missing() {
+        let missing_path = format!(
+            "/tmp/dbdiff-missing-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let err = load(&missing_path).unwrap_err();
+        match err {
+            DbDiffError::InvalidArg(msg) => {
+                assert!(msg.contains("does not exist"));
+                assert!(msg.contains(&missing_path));
+            }
+            other => panic!("expected InvalidArg, got {other:?}"),
+        }
     }
 
     #[test]

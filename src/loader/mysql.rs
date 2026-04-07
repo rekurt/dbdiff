@@ -130,10 +130,7 @@ fn normalize_type(column_type: &str) -> String {
 
 /// Clean up MySQL default values.
 fn normalize_default(default: &str) -> String {
-    // Remove surrounding quotes if present
-    if default.starts_with('\'') && default.ends_with('\'') && default.len() > 2 {
-        return default[1..default.len() - 1].to_string();
-    }
+    // Preserve literal text exactly so downstream SQL rendering keeps valid quoting.
     default.to_string()
 }
 
@@ -155,7 +152,7 @@ mod tests {
     #[test]
     fn test_normalize_default() {
         assert_eq!(normalize_default("0"), "0");
-        assert_eq!(normalize_default("'hello'"), "hello");
+        assert_eq!(normalize_default("'hello'"), "'hello'");
         assert_eq!(normalize_default("CURRENT_TIMESTAMP"), "CURRENT_TIMESTAMP");
         assert_eq!(normalize_default("NULL"), "NULL");
     }
