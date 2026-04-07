@@ -1,4 +1,5 @@
 use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
+use crate::loader::SqlDialect;
 use crate::model::{Column, Index, Table};
 
 /// Generate migration SQL statements from a schema diff.
@@ -11,14 +12,14 @@ use crate::model::{Column, Index, Table};
 /// 5. ADD COLUMNs
 /// 6. ALTER COLUMNs
 /// 7. CREATE INDEXes
-pub fn generate_migration(diff: &SchemaDiff) -> Vec<MigrationStatement> {
+pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
     // Phase 1: DROP INDEXes from modified tables
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.removed_indexes {
             statements.push(MigrationStatement {
-                sql: format!("DROP INDEX {};", idx.name),
+                sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
             });
         }
@@ -91,7 +92,7 @@ pub fn generate_migration(diff: &SchemaDiff) -> Vec<MigrationStatement> {
 
     // Phase 6: ALTER COLUMNs
     for table_diff in &diff.modified_tables {
-        let mut alter_stmts = generate_column_alterations(table_diff);
+        let mut alter_stmts = generate_column_alterations(table_diff, dialect);
         statements.append(&mut alter_stmts);
     }
 
@@ -136,6 +137,13 @@ fn create_index_sql(idx: &Index) -> String {
     )
 }
 
+fn drop_index_sql(idx: &Index, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::MySql => format!("DROP INDEX {} ON {};", idx.name, idx.table_name),
+        _ => format!("DROP INDEX {};", idx.name),
+    }
+}
+
 fn add_column_warnings(col: &Column) -> Vec<String> {
     let mut warnings = Vec::new();
     if !col.is_nullable && col.default.is_none() {
@@ -155,7 +163,10 @@ fn add_column_warnings(col: &Column) -> Vec<String> {
     warnings
 }
 
-fn generate_column_alterations(table_diff: &TableDiff) -> Vec<MigrationStatement> {
+fn generate_column_alterations(
+    table_diff: &TableDiff,
+    dialect: SqlDialect,
+) -> Vec<MigrationStatement> {
     let mut stmts = Vec::new();
 
     for col_diff in &table_diff.modified_columns {
@@ -164,17 +175,38 @@ fn generate_column_alterations(table_diff: &TableDiff) -> Vec<MigrationStatement
 
         // Type change
         if old.data_type != new.data_type {
-            stmts.push(MigrationStatement {
-                sql: format!(
-                    "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
-                    new.name, new.data_type
-                ),
-                warnings: vec![format!(
-                    "Changing column type from '{}' to '{}' may require a table rewrite \
-                     and AccessExclusiveLock.",
-                    old.data_type, new.data_type
-                )],
-            });
+            match dialect {
+                SqlDialect::MySql => stmts.push(MigrationStatement {
+                    sql: format!("ALTER TABLE {table} MODIFY COLUMN {};", new.definition()),
+                    warnings: vec![format!(
+                        "Changing column type from '{}' to '{}' may require a table rewrite \
+                         and table lock.",
+                        old.data_type, new.data_type
+                    )],
+                }),
+                SqlDialect::Sqlite => stmts.push(MigrationStatement {
+                    sql: format!(
+                        "-- manual migration required for type change on {table}.{}",
+                        new.name
+                    ),
+                    warnings: vec![format!(
+                        "SQLite does not support ALTER COLUMN TYPE directly for '{}'. \
+                         Recreate table '{table}' with the desired column definition.",
+                        new.name
+                    )],
+                }),
+                _ => stmts.push(MigrationStatement {
+                    sql: format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
+                        new.name, new.data_type
+                    ),
+                    warnings: vec![format!(
+                        "Changing column type from '{}' to '{}' may require a table rewrite \
+                         and AccessExclusiveLock.",
+                        old.data_type, new.data_type
+                    )],
+                }),
+            }
         }
 
         // Nullability change
@@ -262,7 +294,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(
@@ -289,7 +321,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
@@ -309,7 +341,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].sql.starts_with("CREATE TABLE orders"));
@@ -332,7 +364,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(
@@ -365,7 +397,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
@@ -407,7 +439,7 @@ mod tests {
         right.tables.insert("orders".into(), orders);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
 
@@ -423,5 +455,55 @@ mod tests {
         assert!(drop_col_pos < drop_table_pos);
         assert!(drop_table_pos < create_table_pos);
         assert!(create_table_pos < add_col_pos);
+    }
+
+    #[test]
+    fn mysql_drop_index_uses_on_clause() {
+        let mut left = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_orders_id".into(),
+            Index {
+                name: "idx_orders_id".into(),
+                table_name: "orders".into(),
+                columns: vec!["id".into()],
+                is_unique: false,
+            },
+        );
+        left.tables.insert("orders".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        assert_eq!(stmts[0].sql, "DROP INDEX idx_orders_id ON orders;");
+    }
+
+    #[test]
+    fn sqlite_type_change_generates_manual_warning() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Sqlite);
+
+        assert!(stmts[0].sql.starts_with("-- manual migration required"));
+        assert!(stmts[0].warnings[0].contains("does not support ALTER COLUMN TYPE"));
     }
 }

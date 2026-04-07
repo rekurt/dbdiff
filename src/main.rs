@@ -6,6 +6,7 @@ use dbdiff::cli::{Args, OutputFormat};
 use dbdiff::config;
 use dbdiff::diff::diff_schemas;
 use dbdiff::loader;
+use dbdiff::loader::SqlDialect;
 use dbdiff::migration::generate_migration;
 use dbdiff::output;
 
@@ -40,16 +41,27 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         ExitCode::from(2)
     })?;
 
-    config::filter::apply_ignore(&mut left, &cfg.ignore);
-    config::filter::apply_ignore(&mut right, &cfg.ignore);
+    config::filter::apply_ignore(&mut left.schema, &cfg.ignore);
+    config::filter::apply_ignore(&mut right.schema, &cfg.ignore);
 
     // Apply config color setting (CLI could override later with --color flag)
     if let Some(false) = cfg.output.color {
         colored::control::set_override(false);
     }
 
-    let diff = diff_schemas(&left, &right);
-    let statements = generate_migration(&diff);
+    let diff = diff_schemas(&left.schema, &right.schema);
+    let migration_dialect = match (left.dialect, right.dialect) {
+        (SqlDialect::SqlFile, other) | (other, SqlDialect::SqlFile) => other,
+        (l, r) if l == r => l,
+        (l, r) => {
+            eprintln!(
+                "Error: Cannot generate migration for mixed backends ({l:?} vs {r:?}). \
+                 Compare like-for-like backends or use a .sql file for one side."
+            );
+            return Err(ExitCode::from(2));
+        }
+    };
+    let statements = generate_migration(&diff, migration_dialect);
     let format = args.resolve_format(&cfg.output.format);
 
     match format {

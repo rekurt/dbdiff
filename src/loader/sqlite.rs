@@ -131,9 +131,9 @@ fn normalize_type(sqlite_type: &str) -> String {
         "TEXT" | "CLOB" => "text".to_string(),
         "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT" => "real".to_string(),
         "BLOB" => "blob".to_string(),
-        "BOOLEAN" | "BOOL" => "integer".to_string(), // SQLite stores booleans as integers
-        "DATETIME" | "TIMESTAMP" => "text".to_string(), // SQLite stores dates as text
-        "" => "blob".to_string(),                    // untyped columns default to blob affinity
+        "BOOLEAN" | "BOOL" => "bool".to_string(),
+        "DATETIME" | "TIMESTAMP" => "datetime".to_string(),
+        "" => "blob".to_string(), // untyped columns default to blob affinity
         _ => {
             // Handle types with length: VARCHAR(255) -> varchar(255)
             sqlite_type.to_lowercase()
@@ -158,8 +158,8 @@ mod tests {
         assert_eq!(normalize_type("TEXT"), "text");
         assert_eq!(normalize_type("REAL"), "real");
         assert_eq!(normalize_type("BLOB"), "blob");
-        assert_eq!(normalize_type("BOOLEAN"), "integer");
-        assert_eq!(normalize_type("DATETIME"), "text");
+        assert_eq!(normalize_type("BOOLEAN"), "bool");
+        assert_eq!(normalize_type("DATETIME"), "datetime");
         assert_eq!(normalize_type("VARCHAR(255)"), "varchar(255)");
         assert_eq!(normalize_type(""), "blob");
     }
@@ -232,7 +232,7 @@ mod tests {
         assert!(!users.columns["id"].is_nullable);
         assert_eq!(users.columns["email"].data_type, "text");
         assert_eq!(users.columns["name"].data_type, "varchar(100)");
-        assert_eq!(users.columns["active"].data_type, "integer"); // BOOLEAN -> integer
+        assert_eq!(users.columns["active"].data_type, "bool");
         assert_eq!(users.columns["active"].default.as_deref(), Some("1"));
         assert_eq!(users.indexes.len(), 1);
         assert!(users.indexes.contains_key("idx_users_email"));
