@@ -43,10 +43,16 @@ async fn run(args: Args) -> Result<(), ExitCode> {
     config::filter::apply_ignore(&mut left, &cfg.ignore);
     config::filter::apply_ignore(&mut right, &cfg.ignore);
 
+    // Apply config color setting (CLI could override later with --color flag)
+    if let Some(false) = cfg.output.color {
+        colored::control::set_override(false);
+    }
+
     let diff = diff_schemas(&left, &right);
     let statements = generate_migration(&diff);
+    let format = args.resolve_format(&cfg.output.format);
 
-    match args.format {
+    match format {
         OutputFormat::Pretty => {
             output::print_diff(&diff);
             if !statements.is_empty() {

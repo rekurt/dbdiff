@@ -32,9 +32,9 @@ pub struct Args {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Output format
-    #[arg(long, value_enum, default_value = "pretty")]
-    pub format: OutputFormat,
+    /// Output format (overrides config file setting)
+    #[arg(long, value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Path to config file
     #[arg(long, value_name = "FILE", default_value = ".dbdiff.yml")]
@@ -57,6 +57,22 @@ impl Args {
             Ok(target.as_str())
         } else {
             Err("Either a target DSN or --schema <file> is required")
+        }
+    }
+
+    /// Resolve the output format: CLI flag > config file > default (pretty).
+    pub fn resolve_format(&self, config_format: &Option<String>) -> OutputFormat {
+        if let Some(ref fmt) = self.format {
+            return fmt.clone();
+        }
+        if let Some(ref fmt) = config_format {
+            match fmt.to_lowercase().as_str() {
+                "json" => OutputFormat::Json,
+                "sql" => OutputFormat::Sql,
+                _ => OutputFormat::Pretty,
+            }
+        } else {
+            OutputFormat::Pretty
         }
     }
 }

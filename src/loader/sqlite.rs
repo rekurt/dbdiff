@@ -88,10 +88,12 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
         }
 
         // PRAGMA index_info returns: seqno, cid, name
+        // For expression indexes, name is NULL — skip those columns
         let mut col_stmt = conn.prepare(&format!("PRAGMA index_info(\"{}\")", index_name))?;
         let columns: Vec<String> = col_stmt
-            .query_map([], |row| row.get(2))?
-            .collect::<Result<_, _>>()?;
+            .query_map([], |row| row.get::<_, Option<String>>(2))?
+            .filter_map(|r| r.ok().flatten())
+            .collect();
 
         let index = Index {
             name: index_name.clone(),
@@ -211,5 +213,25 @@ mod tests {
         assert_eq!(orders.columns.len(), 3);
         assert_eq!(orders.indexes.len(), 1);
         assert!(orders.indexes.contains_key("idx_orders_user_id"));
+    }
+
+    #[test]
+    fn expression_index_columns_are_skipped() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE items (
+                id INTEGER PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL
+            );
+            CREATE INDEX idx_items_lower_name ON items(lower(name));",
+        )
+        .unwrap();
+
+        let mut table = Table::new("items");
+        load_indexes(&conn, "items", &mut table).unwrap();
+
+        // Expression index should still be loaded, but with no column names
+        let idx = &table.indexes["idx_items_lower_name"];
+        assert!(idx.columns.is_empty());
     }
 }
