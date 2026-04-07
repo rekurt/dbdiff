@@ -54,7 +54,7 @@ pub async fn load_schema(source: &str) -> Result<LoadedSchema, DbDiffError> {
             .await
             .map_err(|e| DbDiffError::InvalidArg(e.to_string()))?;
         return Ok(LoadedSchema {
-            schema,
+            schema: schema?,
             dialect: SqlDialect::Sqlite,
         });
     }

@@ -26,7 +26,7 @@ fn parse_create_tables(content: &str, schema: &mut Schema) -> Result<(), DbDiffE
 
     for cap in re.captures_iter(content) {
         let table_name = cap[1].to_string();
-        let match_end = cap.get(0).unwrap().end();
+        let match_end = cap.get(0).expect("group 0 always exists").end();
 
         // Find the matching closing parenthesis, handling nested parens
         let body = extract_parenthesized_body(content, match_end)?;

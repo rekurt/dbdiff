@@ -1,16 +1,33 @@
+use std::sync::OnceLock;
+
 use tokio_postgres::NoTls;
 
-use crate::error::DbDiffError;
+use crate::error::{sanitize_dsn, DbDiffError};
 use crate::model::{Column, Index, Schema, Table};
 
 /// Load a schema from a live PostgreSQL database via DSN.
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
+    let host = sanitize_dsn(dsn);
+
+    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
+        .await
+        .map_err(|e| DbDiffError::PostgresConnect {
+            host: host.clone(),
+            source: e,
+        })?;
 
     // Spawn the connection handler
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error: {e}");
+            use std::error::Error;
+            let mut msg = e.to_string();
+            let mut source = e.source();
+            while let Some(cause) = source {
+                msg.push_str(": ");
+                msg.push_str(&cause.to_string());
+                source = cause.source();
+            }
+            eprintln!("PostgreSQL connection error ({}): {msg}", host);
         }
     });
 
@@ -120,7 +137,11 @@ fn normalize_type(data_type: &str, char_max_len: Option<i32>) -> String {
 /// Clean up default expressions from PostgreSQL.
 fn normalize_default(default: &str) -> String {
     // Remove type casts like ::character varying, ::text, etc.
-    let re = regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?").unwrap();
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?")
+            .expect("hardcoded regex must compile")
+    });
     let cleaned = re.replace_all(default, "").trim().to_string();
 
     // Remove surrounding quotes from string defaults

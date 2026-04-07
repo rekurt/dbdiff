@@ -12,7 +12,9 @@ pub fn apply_ignore(schema: &mut Schema, ignore: &IgnoreConfig) {
     if !ignore.columns.is_empty() {
         let table_names: Vec<String> = schema.tables.keys().cloned().collect();
         for table_name in &table_names {
-            let table = schema.tables.get_mut(table_name).unwrap();
+            let Some(table) = schema.tables.get_mut(table_name) else {
+                continue;
+            };
             let col_names: Vec<String> = table.columns.keys().cloned().collect();
             let mut removed_columns: Vec<String> = Vec::new();
 

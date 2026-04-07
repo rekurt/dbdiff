@@ -5,6 +5,11 @@ use std::fmt;
 pub enum DbDiffError {
     #[cfg(feature = "postgres")]
     Postgres(tokio_postgres::Error),
+    #[cfg(feature = "postgres")]
+    PostgresConnect {
+        host: String,
+        source: tokio_postgres::Error,
+    },
     #[cfg(feature = "mysql")]
     MySQL(mysql_async::Error),
     #[cfg(feature = "sqlite")]
@@ -14,15 +19,44 @@ pub enum DbDiffError {
     InvalidArg(String),
 }
 
+/// Walk the error source chain and collect all messages.
+fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
+
+/// Extract host from a DSN, stripping credentials.
+/// "postgres://user:secret@myhost:5432/mydb" -> "myhost:5432/mydb"
+pub(crate) fn sanitize_dsn(dsn: &str) -> String {
+    if let Some(at_pos) = dsn.find('@') {
+        dsn[at_pos + 1..].to_string()
+    } else {
+        dsn.strip_prefix("postgres://")
+            .or_else(|| dsn.strip_prefix("postgresql://"))
+            .unwrap_or(dsn)
+            .to_string()
+    }
+}
+
 impl fmt::Display for DbDiffError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(feature = "postgres")]
-            Self::Postgres(e) => write!(f, "PostgreSQL error: {e}"),
+            Self::Postgres(e) => write!(f, "PostgreSQL error: {}", format_error_chain(e)),
+            #[cfg(feature = "postgres")]
+            Self::PostgresConnect { host, source } => {
+                write!(f, "PostgreSQL connection to '{}' failed: {}", host, format_error_chain(source))
+            }
             #[cfg(feature = "mysql")]
-            Self::MySQL(e) => write!(f, "MySQL error: {e}"),
+            Self::MySQL(e) => write!(f, "MySQL error: {}", format_error_chain(e)),
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(e) => write!(f, "SQLite error: {e}"),
+            Self::Sqlite(e) => write!(f, "SQLite error: {}", format_error_chain(e)),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::SqlParse(msg) => write!(f, "SQL parse error: {msg}"),
             Self::InvalidArg(msg) => write!(f, "Invalid argument: {msg}"),
@@ -35,6 +69,8 @@ impl std::error::Error for DbDiffError {
         match self {
             #[cfg(feature = "postgres")]
             Self::Postgres(e) => Some(e),
+            #[cfg(feature = "postgres")]
+            Self::PostgresConnect { source, .. } => Some(source),
             #[cfg(feature = "mysql")]
             Self::MySQL(e) => Some(e),
             #[cfg(feature = "sqlite")]
