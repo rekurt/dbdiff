@@ -1,5 +1,6 @@
 use mysql_async::prelude::*;
 use mysql_async::{Opts, OptsBuilder};
+use std::collections::BTreeMap;
 
 use crate::error::DbDiffError;
 use crate::model::{Column, Index, Schema, Table};
@@ -46,7 +47,7 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
     }
 
     // Load indexes from information_schema.statistics
-    let idx_rows: Vec<(String, String, String, i64)> = conn
+    let idx_rows: Vec<(String, String, Option<String>, i64)> = conn
         .exec(
             "SELECT table_name, index_name, column_name, non_unique \
              FROM information_schema.statistics \
@@ -56,18 +57,14 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         )
         .await?;
 
-    // Group columns by (table_name, index_name)
-    let mut index_map: std::collections::BTreeMap<(String, String), (Vec<String>, bool)> =
-        std::collections::BTreeMap::new();
-
-    for (table_name, index_name, column_name, non_unique) in &idx_rows {
-        let entry = index_map
-            .entry((table_name.clone(), index_name.clone()))
-            .or_insert_with(|| (Vec::new(), *non_unique == 0));
-        entry.0.push(column_name.clone());
-    }
-
+    let index_map = group_index_rows(&idx_rows);
     for ((table_name, index_name), (columns, is_unique)) in index_map {
+        if columns.is_empty() {
+            // Functional indexes can have NULL `column_name` in information_schema.statistics.
+            // Skip for now to avoid creating malformed empty-column indexes in downstream SQL.
+            continue;
+        }
+
         let index = Index {
             name: index_name.clone(),
             table_name: table_name.clone(),
@@ -82,6 +79,23 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
 
     pool.disconnect().await?;
     Ok(schema)
+}
+
+fn group_index_rows(
+    idx_rows: &[(String, String, Option<String>, i64)],
+) -> BTreeMap<(String, String), (Vec<String>, bool)> {
+    let mut index_map: BTreeMap<(String, String), (Vec<String>, bool)> = BTreeMap::new();
+
+    for (table_name, index_name, column_name, non_unique) in idx_rows {
+        let entry = index_map
+            .entry((table_name.clone(), index_name.clone()))
+            .or_insert_with(|| (Vec::new(), *non_unique == 0));
+        if let Some(column_name) = column_name {
+            entry.0.push(column_name.clone());
+        }
+    }
+
+    index_map
 }
 
 /// Normalize MySQL column types.
@@ -144,5 +158,29 @@ mod tests {
         assert_eq!(normalize_default("'hello'"), "hello");
         assert_eq!(normalize_default("CURRENT_TIMESTAMP"), "CURRENT_TIMESTAMP");
         assert_eq!(normalize_default("NULL"), "NULL");
+    }
+
+    #[test]
+    fn test_group_index_rows_handles_null_column_names() {
+        let rows = vec![
+            (
+                "users".to_string(),
+                "idx_users_email".to_string(),
+                Some("email".to_string()),
+                0,
+            ),
+            ("users".to_string(), "idx_users_func".to_string(), None, 1),
+        ];
+
+        let grouped = group_index_rows(&rows);
+
+        assert_eq!(
+            grouped.get(&(String::from("users"), String::from("idx_users_email"))),
+            Some(&(vec![String::from("email")], true))
+        );
+        assert_eq!(
+            grouped.get(&(String::from("users"), String::from("idx_users_func"))),
+            Some(&(Vec::new(), false))
+        );
     }
 }

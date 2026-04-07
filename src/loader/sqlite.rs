@@ -95,6 +95,12 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
             .filter_map(|r| r.ok().flatten())
             .collect();
 
+        if columns.is_empty() {
+            // Expression indexes report NULL column names via PRAGMA index_info.
+            // Skip these until expression terms are represented explicitly.
+            continue;
+        }
+
         let index = Index {
             name: index_name.clone(),
             table_name: table_name.to_string(),
@@ -216,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn expression_index_columns_are_skipped() {
+    fn expression_indexes_are_skipped() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE items (
@@ -230,8 +236,7 @@ mod tests {
         let mut table = Table::new("items");
         load_indexes(&conn, "items", &mut table).unwrap();
 
-        // Expression index should still be loaded, but with no column names
-        let idx = &table.indexes["idx_items_lower_name"];
-        assert!(idx.columns.is_empty());
+        // Expression index is skipped to avoid producing empty-column SQL definitions.
+        assert!(!table.indexes.contains_key("idx_items_lower_name"));
     }
 }
