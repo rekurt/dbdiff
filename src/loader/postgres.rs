@@ -155,13 +155,9 @@ fn normalize_default(default: &str) -> String {
 /// Extract column names from an index definition string.
 /// Example: "CREATE INDEX idx_name ON table_name USING btree (col1, col2)"
 fn parse_index_columns(indexdef: &str) -> Vec<String> {
-    // Find the opening paren of the column list.
-    // PostgreSQL indexdef format: CREATE [UNIQUE] INDEX name ON table [USING method] (columns)
-    // We need the first '(' that appears after "ON table_name", not the last one.
-    // Use ASCII case-insensitive search directly on the original string to find " ON ".
-    // Avoids to_uppercase() which can change byte lengths for non-ASCII characters
-    // (e.g. 'ı' → 'I'), making byte offsets from the uppercase copy invalid for
-    // slicing the original string.
+    // PostgreSQL indexdef format: CREATE [UNIQUE] INDEX name ON [schema.]table [USING method] (columns)
+    // Use ASCII case-insensitive search to find " ON " without byte-offset issues from
+    // to_uppercase() on non-ASCII characters (e.g. 'ı' → 'I' changes byte length).
     let on_pos = match indexdef
         .as_bytes()
         .windows(4)
@@ -171,50 +167,49 @@ fn parse_index_columns(indexdef: &str) -> Vec<String> {
         None => return Vec::new(),
     };
 
-    let after_on = &indexdef[on_pos..];
-    let open = match after_on.find('(') {
-        Some(p) => on_pos + p,
+    // Find the opening '(' of the column list, skipping any '(' inside double-quoted
+    // identifiers (e.g. table names containing parentheses).
+    let after_on = &indexdef[on_pos + 4..];
+    let open = match find_unquoted_char(after_on, '(') {
+        Some(p) => on_pos + 4 + p,
         None => return Vec::new(),
     };
 
-    // Walk forward to find the matching close paren
-    let bytes = indexdef.as_bytes();
-    let mut depth = 1;
-    let mut pos = open + 1;
-    while pos < bytes.len() && depth > 0 {
-        match bytes[pos] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            _ => {}
-        }
-        pos += 1;
-    }
+    // Walk forward to find the matching close paren, skipping quoted content.
+    let close = match find_matching_close_paren(indexdef, open) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
 
-    if depth != 0 {
-        return Vec::new();
-    }
+    let cols_str = &indexdef[open + 1..close];
 
-    let cols_str = &indexdef[open + 1..pos - 1];
-
-    // Split on commas at top level (depth 0)
+    // Split on commas at top level (depth 0), quote-aware.
     let mut result = Vec::new();
     let mut current = String::new();
-    let mut paren_depth = 0;
+    let mut paren_depth: i32 = 0;
+    let mut in_quotes = false;
     for ch in cols_str.chars() {
-        match ch {
-            '(' => {
-                paren_depth += 1;
-                current.push(ch);
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            current.push(ch);
+        } else if in_quotes {
+            current.push(ch);
+        } else {
+            match ch {
+                '(' => {
+                    paren_depth += 1;
+                    current.push(ch);
+                }
+                ')' => {
+                    paren_depth -= 1;
+                    current.push(ch);
+                }
+                ',' if paren_depth == 0 => {
+                    result.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
             }
-            ')' => {
-                paren_depth -= 1;
-                current.push(ch);
-            }
-            ',' if paren_depth == 0 => {
-                result.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(ch),
         }
     }
 
@@ -224,6 +219,42 @@ fn parse_index_columns(indexdef: &str) -> Vec<String> {
     }
 
     result
+}
+
+/// Find the byte position of `target` that is not inside double-quoted identifiers.
+fn find_unquoted_char(s: &str, target: char) -> Option<usize> {
+    let mut in_quotes = false;
+    for (i, ch) in s.char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && ch == target {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the matching close paren for the '(' at `open`, skipping quoted content.
+fn find_matching_close_paren(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut in_quotes = false;
+    for (i, ch) in s[open + 1..].char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + 1 + i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -305,6 +336,28 @@ mod tests {
                 "CREATE INDEX \"ındex_türkçe\" ON \"schéma\".\"tablo\" USING btree (\"sütun\")"
             ),
             vec!["\"sütun\""]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_table_name_with_parens() {
+        // Table name containing '(' should not confuse the column-list finder.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"
+            ),
+            vec!["col1", "col2"]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_quoted_parens_in_columns() {
+        // Parentheses inside double-quoted identifiers should be ignored during depth scan.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON t USING btree (\"a)\", b)"
+            ),
+            vec!["\"a)\"", "b"]
         );
     }
 
