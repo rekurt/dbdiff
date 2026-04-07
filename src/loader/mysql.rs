@@ -25,6 +25,12 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
             "SELECT table_name, column_name, column_type, is_nullable, column_default \
              FROM information_schema.columns \
              WHERE table_schema = :db \
+               AND table_name IN ( \
+                 SELECT table_name \
+                 FROM information_schema.tables \
+                 WHERE table_schema = :db \
+                   AND table_type = 'BASE TABLE' \
+               ) \
              ORDER BY table_name, ordinal_position",
             mysql_async::params! { "db" => &db_name },
         )
@@ -51,7 +57,14 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         .exec(
             "SELECT table_name, index_name, column_name, non_unique \
              FROM information_schema.statistics \
-             WHERE table_schema = :db AND index_name != 'PRIMARY' \
+             WHERE table_schema = :db \
+               AND index_name != 'PRIMARY' \
+               AND table_name IN ( \
+                 SELECT table_name \
+                 FROM information_schema.tables \
+                 WHERE table_schema = :db \
+                   AND table_type = 'BASE TABLE' \
+               ) \
              ORDER BY table_name, index_name, seq_in_index",
             mysql_async::params! { "db" => &db_name },
         )

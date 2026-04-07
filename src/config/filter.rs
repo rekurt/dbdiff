@@ -14,6 +14,7 @@ pub fn apply_ignore(schema: &mut Schema, ignore: &IgnoreConfig) {
         for table_name in &table_names {
             let table = schema.tables.get_mut(table_name).unwrap();
             let col_names: Vec<String> = table.columns.keys().cloned().collect();
+            let mut removed_columns: Vec<String> = Vec::new();
 
             for col_name in &col_names {
                 if ignore
@@ -22,7 +23,17 @@ pub fn apply_ignore(schema: &mut Schema, ignore: &IgnoreConfig) {
                     .any(|pattern| matches_column_pattern(table_name, col_name, pattern))
                 {
                     table.columns.remove(col_name);
+                    removed_columns.push(col_name.clone());
                 }
+            }
+
+            if !removed_columns.is_empty() {
+                table.indexes.retain(|_, index| {
+                    !index
+                        .columns
+                        .iter()
+                        .any(|index_col| removed_columns.iter().any(|removed| removed == index_col))
+                });
             }
         }
     }
@@ -48,7 +59,7 @@ fn matches_column_pattern(table: &str, column: &str, pattern: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Column, Table};
+    use crate::model::{Column, Index, Table};
 
     fn make_column(name: &str) -> Column {
         Column {
@@ -56,6 +67,18 @@ mod tests {
             data_type: "text".to_string(),
             is_nullable: true,
             default: None,
+        }
+    }
+
+    fn make_index(table: &str, name: &str, columns: Vec<&str>) -> Index {
+        Index {
+            name: name.to_string(),
+            table_name: table.to_string(),
+            columns: columns
+                .into_iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            is_unique: false,
         }
     }
 
@@ -169,5 +192,45 @@ mod tests {
 
         apply_ignore(&mut schema, &ignore);
         assert!(schema.tables["sessions"].columns.is_empty());
+    }
+
+    #[test]
+    fn apply_ignore_removes_indexes_on_ignored_columns() {
+        let mut schema = Schema::new();
+        let mut t = Table::new("users");
+        t.columns.insert("id".into(), make_column("id"));
+        t.columns.insert("email".into(), make_column("email"));
+        t.columns
+            .insert("created_at".into(), make_column("created_at"));
+        t.indexes.insert(
+            "idx_users_email".into(),
+            make_index("users", "idx_users_email", vec!["email"]),
+        );
+        t.indexes.insert(
+            "idx_users_created_at".into(),
+            make_index("users", "idx_users_created_at", vec!["created_at"]),
+        );
+        t.indexes.insert(
+            "idx_users_email_created_at".into(),
+            make_index(
+                "users",
+                "idx_users_email_created_at",
+                vec!["email", "created_at"],
+            ),
+        );
+        schema.tables.insert("users".into(), t);
+
+        let ignore = IgnoreConfig {
+            tables: vec![],
+            columns: vec!["*.created_at".into()],
+        };
+
+        apply_ignore(&mut schema, &ignore);
+
+        let users = &schema.tables["users"];
+        assert!(!users.columns.contains_key("created_at"));
+        assert!(users.indexes.contains_key("idx_users_email"));
+        assert!(!users.indexes.contains_key("idx_users_created_at"));
+        assert!(!users.indexes.contains_key("idx_users_email_created_at"));
     }
 }
