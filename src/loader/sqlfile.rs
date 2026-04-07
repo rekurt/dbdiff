@@ -197,8 +197,12 @@ fn normalize_sql_type(raw: &str) -> String {
 
 /// Extract DEFAULT value from column modifiers string.
 fn parse_default(modifiers: &str) -> Option<String> {
-    let upper = modifiers.to_uppercase();
-    let idx = upper.find("DEFAULT")?;
+    // Use ASCII case-insensitive search on the original string to avoid byte-offset
+    // mismatch when non-ASCII characters change length under to_uppercase().
+    let idx = modifiers
+        .as_bytes()
+        .windows(7)
+        .position(|w| w.eq_ignore_ascii_case(b"DEFAULT"))?;
     let after = &modifiers[idx + 7..].trim_start();
 
     // Parse the default value — could be a function call, string, or simple value

@@ -155,13 +155,75 @@ fn normalize_default(default: &str) -> String {
 /// Extract column names from an index definition string.
 /// Example: "CREATE INDEX idx_name ON table_name USING btree (col1, col2)"
 fn parse_index_columns(indexdef: &str) -> Vec<String> {
-    if let Some(start) = indexdef.rfind('(') {
-        if let Some(end) = indexdef.rfind(')') {
-            let cols = &indexdef[start + 1..end];
-            return cols.split(',').map(|c| c.trim().to_string()).collect();
+    // Find the opening paren of the column list.
+    // PostgreSQL indexdef format: CREATE [UNIQUE] INDEX name ON table [USING method] (columns)
+    // We need the first '(' that appears after "ON table_name", not the last one.
+    // Use ASCII case-insensitive search directly on the original string to find " ON ".
+    // Avoids to_uppercase() which can change byte lengths for non-ASCII characters
+    // (e.g. 'ı' → 'I'), making byte offsets from the uppercase copy invalid for
+    // slicing the original string.
+    let on_pos = match indexdef
+        .as_bytes()
+        .windows(4)
+        .position(|w| w.eq_ignore_ascii_case(b" ON "))
+    {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let after_on = &indexdef[on_pos..];
+    let open = match after_on.find('(') {
+        Some(p) => on_pos + p,
+        None => return Vec::new(),
+    };
+
+    // Walk forward to find the matching close paren
+    let bytes = indexdef.as_bytes();
+    let mut depth = 1;
+    let mut pos = open + 1;
+    while pos < bytes.len() && depth > 0 {
+        match bytes[pos] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        pos += 1;
+    }
+
+    if depth != 0 {
+        return Vec::new();
+    }
+
+    let cols_str = &indexdef[open + 1..pos - 1];
+
+    // Split on commas at top level (depth 0)
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0;
+    for ch in cols_str.chars() {
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current.push(ch);
+            }
+            ',' if paren_depth == 0 => {
+                result.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
         }
     }
-    Vec::new()
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -202,5 +264,75 @@ mod tests {
             parse_index_columns("CREATE UNIQUE INDEX idx ON table (email)"),
             vec!["email"]
         );
+    }
+
+    #[test]
+    fn test_parse_expression_index_columns() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx_lower_email ON users USING btree (lower(email))"),
+            vec!["lower(email)"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sorted_index_columns() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx ON events USING btree (created_at DESC)"),
+            vec!["created_at DESC"]
+        );
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON events USING btree (user_id ASC, created_at DESC)"
+            ),
+            vec!["user_id ASC", "created_at DESC"]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_with_quoted_identifiers() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx ON users USING btree (\"Email\", \"FirstName\")"),
+            vec!["\"Email\"", "\"FirstName\""]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_with_non_ascii_identifiers() {
+        // 'ı' (U+0131, 2 bytes UTF-8) uppercases to 'I' (1 byte), shifting byte offsets.
+        // This verifies we don't use uppercased offsets to slice the original string.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX \"ındex_türkçe\" ON \"schéma\".\"tablo\" USING btree (\"sütun\")"
+            ),
+            vec!["\"sütun\""]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_no_parens_returns_empty() {
+        assert!(parse_index_columns("not a valid index def").is_empty());
+    }
+
+    #[test]
+    fn test_normalize_default_with_cast() {
+        assert_eq!(normalize_default("'active'::character varying"), "active");
+        assert_eq!(normalize_default("0::integer"), "0");
+    }
+
+    #[test]
+    fn test_normalize_default_preserves_functions() {
+        assert_eq!(normalize_default("now()"), "now()");
+        assert_eq!(normalize_default("gen_random_uuid()"), "gen_random_uuid()");
+    }
+
+    #[test]
+    fn test_normalize_type_all_variants() {
+        assert_eq!(normalize_type("time without time zone", None), "time");
+        assert_eq!(normalize_type("time with time zone", None), "timetz");
+        assert_eq!(normalize_type("double precision", None), "float8");
+        assert_eq!(normalize_type("real", None), "float4");
+        assert_eq!(normalize_type("smallint", None), "smallint");
+        assert_eq!(normalize_type("character", Some(1)), "char(1)");
+        assert_eq!(normalize_type("character", None), "char");
     }
 }

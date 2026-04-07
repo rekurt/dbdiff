@@ -153,12 +153,10 @@ fn create_table_sql(table: &Table, dialect: SqlDialect) -> String {
 
 fn create_index_sql(idx: &Index, dialect: SqlDialect) -> String {
     let unique = if idx.is_unique { "UNIQUE " } else { "" };
-    let cols = idx
-        .columns
-        .iter()
-        .map(|c| quote_ident(c, dialect))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // Index columns are raw clauses from pg_indexes.indexdef and may contain
+    // expressions (lower(email)), sort orders (created_at DESC), or
+    // already-quoted identifiers.  They must NOT be wrapped with quote_ident.
+    let cols = idx.columns.join(", ");
     format!(
         "CREATE {unique}INDEX {} ON {}({});",
         quote_ident(&idx.name, dialect),
@@ -491,7 +489,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "CREATE INDEX \"idx_orders_id\" ON \"orders\"(\"id\");"
+            "CREATE INDEX \"idx_orders_id\" ON \"orders\"(id);"
         );
     }
 
@@ -648,7 +646,142 @@ mod tests {
     }
 
     #[test]
-    fn postgres_identifiers_are_quoted_and_escaped() {
+    fn expression_index_columns_are_not_quoted() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        t.columns.insert(
+            "created_at".into(),
+            col("created_at", "timestamptz", false, None),
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        t.columns.insert(
+            "created_at".into(),
+            col("created_at", "timestamptz", false, None),
+        );
+        // Expression index: lower(email)
+        t.indexes.insert(
+            "idx_users_email_lower".into(),
+            Index {
+                name: "idx_users_email_lower".into(),
+                table_name: "users".into(),
+                columns: vec!["lower(email)".into()],
+                is_unique: false,
+            },
+        );
+        // Sorted index: created_at DESC
+        t.indexes.insert(
+            "idx_users_created_at_desc".into(),
+            Index {
+                name: "idx_users_created_at_desc".into(),
+                table_name: "users".into(),
+                columns: vec!["created_at DESC".into()],
+                is_unique: false,
+            },
+        );
+        // Already-quoted identifier from pg_indexes
+        t.indexes.insert(
+            "idx_users_mixed".into(),
+            Index {
+                name: "idx_users_mixed".into(),
+                table_name: "users".into(),
+                columns: vec!["\"Email\"".into(), "created_at DESC".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+
+        let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+
+        // Expression index — column clause must not be quoted
+        assert!(sqls.contains(&"CREATE INDEX \"idx_users_email_lower\" ON \"users\"(lower(email));"));
+        // Sorted index — DESC must not be quoted
+        assert!(sqls.contains(&"CREATE INDEX \"idx_users_created_at_desc\" ON \"users\"(created_at DESC);"));
+        // Mixed: already-quoted ident + sort order
+        assert!(
+            sqls.contains(&"CREATE INDEX \"idx_users_mixed\" ON \"users\"(\"Email\", created_at DESC);")
+        );
+    }
+
+    #[test]
+    fn mysql_migration_uses_backtick_quoting_for_camelcase() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("UserAccounts");
+        t.columns
+            .insert("UserId".into(), col("UserId", "int", false, None));
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", true, None));
+        t.indexes.insert(
+            "idx_UserAccounts_email".into(),
+            Index {
+                name: "idx_UserAccounts_email".into(),
+                table_name: "UserAccounts".into(),
+                columns: vec!["email".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("UserAccounts".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+        // Table and column names with uppercase must use backticks, not double quotes
+        assert!(sqls.iter().any(|s| s.contains("`UserAccounts`")));
+        assert!(sqls.iter().any(|s| s.contains("`UserId`")));
+        assert!(sqls.iter().any(|s| s.contains("`idx_UserAccounts_email`")));
+        // Must NOT contain double-quoted identifiers
+        assert!(!sqls.iter().any(|s| s.contains("\"UserAccounts\"")));
+        assert!(!sqls.iter().any(|s| s.contains("\"UserId\"")));
+    }
+
+    #[test]
+    fn quote_ident_postgres() {
+        use super::quote_ident;
+        let pg = SqlDialect::Postgres;
+
+        // All names get double-quoted
+        assert_eq!(quote_ident("users", pg), "\"users\"");
+        assert_eq!(quote_ident("Users", pg), "\"Users\"");
+        assert_eq!(quote_ident("my table", pg), "\"my table\"");
+
+        // Names with embedded quotes get escaped
+        assert_eq!(quote_ident("a\"b", pg), "\"a\"\"b\"");
+
+        // Empty string gets quoted
+        assert_eq!(quote_ident("", pg), "\"\"");
+    }
+
+    #[test]
+    fn quote_ident_mysql_uses_backticks() {
+        use super::quote_ident;
+        let my = SqlDialect::MySql;
+
+        // All names get backtick-quoted
+        assert_eq!(quote_ident("users", my), "`users`");
+        assert_eq!(quote_ident("Users", my), "`Users`");
+        assert_eq!(quote_ident("my table", my), "`my table`");
+
+        // Embedded backtick gets escaped
+        assert_eq!(quote_ident("a`b", my), "`a``b`");
+    }
+
+    #[test]
+    fn postgres_identifiers_are_escaped_against_injection() {
         let left = Schema::new();
         let mut right = Schema::new();
         let mut t = Table::new("users\"; DROP TABLE payments; --");
