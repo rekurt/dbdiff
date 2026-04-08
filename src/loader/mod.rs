@@ -83,6 +83,17 @@ pub async fn load_schema_with_ssl(
         });
     }
 
+    // JSON snapshot files
+    if source.ends_with(".json") {
+        let content = std::fs::read_to_string(source)?;
+        let snapshot: crate::model::SchemaSnapshot = serde_json::from_str(&content)
+            .map_err(|e| DbDiffError::invalid_arg(format!("Failed to parse JSON snapshot: {e}")))?;
+        return Ok(LoadedSchema {
+            schema: snapshot.into(),
+            dialect: SqlDialect::SqlFile,
+        });
+    }
+
     if source.ends_with(".sql") || std::path::Path::new(source).exists() {
         return sqlfile::load_file(source).map(|schema| LoadedSchema {
             schema,

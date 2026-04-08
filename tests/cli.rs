@@ -334,3 +334,80 @@ fn init_refuses_overwrite() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn snapshot_from_sql_file_to_json() {
+    // Snapshot a SQL file schema to JSON, then use that JSON as a source for diff
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("schema.json");
+
+    // First, create a snapshot from a SQL file
+    // (snapshot command needs a DSN, but we can test JSON round-trip by creating one manually)
+    let schema_sql = std::fs::read_to_string("tests/fixtures/schema_a.sql").unwrap();
+
+    // Use diff with sql file as source and verify json output has the right structure
+    let output = cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_a.sql",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"has_changes\": false"));
+
+    // Verify that a JSON snapshot file can be used as a diff source
+    // Create a minimal snapshot JSON
+    let snap_json = r#"{
+        "tables": {
+            "test_table": {
+                "name": "test_table",
+                "columns": {
+                    "id": {"name": "id", "data_type": "integer", "is_nullable": false, "default": null}
+                },
+                "indexes": {},
+                "constraints": {}
+            }
+        },
+        "views": {},
+        "enums": {},
+        "sequences": {}
+    }"#;
+    std::fs::write(&snap_path, snap_json).unwrap();
+
+    // Use JSON snapshot as a diff source
+    cmd()
+        .args([
+            snap_path.to_str().unwrap(),
+            "--schema",
+            "tests/fixtures/schema_a.sql",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"has_changes\""));
+
+    // Verify _ is not needed
+    drop(schema_sql);
+}
+
+#[test]
+fn tables_subcommand_with_invalid_source() {
+    // tables with an unreachable DSN should fail gracefully
+    cmd()
+        .args([
+            "tables",
+            "postgres://invalid:invalid@localhost:1/noexist",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}

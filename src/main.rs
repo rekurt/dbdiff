@@ -5,8 +5,8 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use dbdiff::cli::{
-    Cli, DiffParams, MigrationDirection, OutputFormat, ResolvedCommand, SslMode, TablesArgs,
-    ValidateArgs,
+    Cli, DiffParams, MigrationDirection, OutputFormat, ResolvedCommand, SnapshotArgs, SslMode,
+    TablesArgs, ValidateArgs,
 };
 use dbdiff::config;
 use dbdiff::diff::diff_schemas;
@@ -29,6 +29,7 @@ async fn main() -> ExitCode {
             Ok(())
         }
         ResolvedCommand::Init => run_init(),
+        ResolvedCommand::Snapshot(args) => run_snapshot(args).await,
     };
 
     match result {
@@ -334,6 +335,47 @@ async fn run_tables(args: TablesArgs) -> Result<(), ExitCode> {
 
             println!("{}", "-".repeat(48));
             println!("{} table(s) total", loaded.schema.tables.len());
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            eprintln!("Error: {e}");
+            Err(ExitCode::from(2))
+        }
+        Err(_) => {
+            let err = dbdiff::error::DbDiffError::timeout(&args.dsn, args.timeout);
+            eprintln!("Error: {err}");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+async fn run_snapshot(args: SnapshotArgs) -> Result<(), ExitCode> {
+    let spinner = create_spinner("Loading schema...");
+    let ssl_mode = resolve_ssl_mode(args.ssl_mode);
+    let timeout_duration = std::time::Duration::from_secs(args.timeout);
+
+    let result = tokio::time::timeout(
+        timeout_duration,
+        loader::load_schema_with_ssl(&args.dsn, ssl_mode),
+    )
+    .await;
+
+    spinner.finish_and_clear();
+
+    match result {
+        Ok(Ok(loaded)) => {
+            let snapshot = dbdiff::model::SchemaSnapshot::from(&loaded.schema);
+            let json = serde_json::to_string_pretty(&snapshot).unwrap_or_default();
+
+            if let Some(ref path) = args.out {
+                std::fs::write(path, &json).map_err(|e| {
+                    eprintln!("Error writing snapshot: {e}");
+                    ExitCode::from(2)
+                })?;
+                eprintln!("Snapshot written to {path}");
+            } else {
+                println!("{json}");
+            }
             Ok(())
         }
         Ok(Err(e)) => {

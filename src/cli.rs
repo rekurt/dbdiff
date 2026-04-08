@@ -92,6 +92,28 @@ pub enum Commands {
     Completions(CompletionsArgs),
     /// Create a default .dbdiff.yml configuration file
     Init,
+    /// Export schema as JSON snapshot for offline comparison
+    Snapshot(SnapshotArgs),
+}
+
+/// Arguments for the snapshot subcommand.
+#[derive(Parser, Debug)]
+pub struct SnapshotArgs {
+    /// Database DSN to snapshot
+    #[arg(value_name = "DSN")]
+    pub dsn: String,
+
+    /// Output file (defaults to stdout)
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<String>,
+
+    /// Connection timeout in seconds
+    #[arg(long, value_name = "SECONDS", default_value = "10")]
+    pub timeout: u64,
+
+    /// SSL mode for database connections
+    #[arg(long, value_enum, default_value = "prefer")]
+    pub ssl_mode: SslMode,
 }
 
 /// Arguments for the diff subcommand (mirrors top-level args).
@@ -228,6 +250,7 @@ impl Cli {
             Some(Commands::Tables(args)) => ResolvedCommand::Tables(args),
             Some(Commands::Completions(args)) => ResolvedCommand::Completions(args),
             Some(Commands::Init) => ResolvedCommand::Init,
+            Some(Commands::Snapshot(args)) => ResolvedCommand::Snapshot(args),
             None => {
                 // Backward compat: top-level args are treated as diff
                 let source = self.source.unwrap_or_default();
@@ -303,6 +326,7 @@ pub enum ResolvedCommand {
     Tables(TablesArgs),
     Completions(CompletionsArgs),
     Init,
+    Snapshot(SnapshotArgs),
 }
 
 impl DiffParams {
