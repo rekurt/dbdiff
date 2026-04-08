@@ -166,7 +166,7 @@ impl CiReport {
                     table: tname.clone(),
                     name: idx.name.clone(),
                     description: format!("DROP INDEX {}", idx.name),
-                    is_blocking: false,
+                    is_blocking: true,
                     sql: statements
                         .iter()
                         .find(|s| s.sql.contains("DROP INDEX") && s.sql.contains(&idx.name))
@@ -174,6 +174,137 @@ impl CiReport {
                         .unwrap_or_default(),
                 });
             }
+
+            // Constraints
+            for c in &table_diff.added_constraints {
+                let stmt = statements
+                    .iter()
+                    .find(|s| s.sql.contains("ADD CONSTRAINT") && s.sql.contains(&c.name));
+                changes.push(CiChange {
+                    change_type: "ADD".to_string(),
+                    object: "CONSTRAINT".to_string(),
+                    table: tname.clone(),
+                    name: c.name.clone(),
+                    description: format!("ADD CONSTRAINT {} {}", c.name, c.definition()),
+                    is_blocking: stmt.map(|s| s.is_blocking).unwrap_or(true),
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+                });
+            }
+
+            for c in &table_diff.removed_constraints {
+                changes.push(CiChange {
+                    change_type: "DROP".to_string(),
+                    object: "CONSTRAINT".to_string(),
+                    table: tname.clone(),
+                    name: c.name.clone(),
+                    description: format!("DROP CONSTRAINT {}", c.name),
+                    is_blocking: true,
+                    sql: statements
+                        .iter()
+                        .find(|s| s.sql.contains("DROP CONSTRAINT") && s.sql.contains(&c.name))
+                        .or_else(|| {
+                            statements.iter().find(|s| {
+                                s.sql.contains("DROP FOREIGN KEY") && s.sql.contains(&c.name)
+                            })
+                        })
+                        .map(|s| s.sql.clone())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+
+        // Views
+        for view in &diff.added_views {
+            changes.push(CiChange {
+                change_type: "ADD".to_string(),
+                object: "VIEW".to_string(),
+                table: String::new(),
+                name: view.name.clone(),
+                description: format!("ADD VIEW {}", view.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+        for view in &diff.removed_views {
+            changes.push(CiChange {
+                change_type: "DROP".to_string(),
+                object: "VIEW".to_string(),
+                table: String::new(),
+                name: view.name.clone(),
+                description: format!("DROP VIEW {}", view.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+        for vd in &diff.modified_views {
+            changes.push(CiChange {
+                change_type: "ALTER".to_string(),
+                object: "VIEW".to_string(),
+                table: String::new(),
+                name: vd.name.clone(),
+                description: format!("ALTER VIEW {}", vd.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+
+        // Enums
+        for e in &diff.added_enums {
+            changes.push(CiChange {
+                change_type: "ADD".to_string(),
+                object: "ENUM".to_string(),
+                table: String::new(),
+                name: e.name.clone(),
+                description: format!("ADD ENUM {}", e.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+        for e in &diff.removed_enums {
+            changes.push(CiChange {
+                change_type: "DROP".to_string(),
+                object: "ENUM".to_string(),
+                table: String::new(),
+                name: e.name.clone(),
+                description: format!("DROP ENUM {}", e.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+        for ed in &diff.modified_enums {
+            changes.push(CiChange {
+                change_type: "ALTER".to_string(),
+                object: "ENUM".to_string(),
+                table: String::new(),
+                name: ed.name.clone(),
+                description: format!("ALTER ENUM {}", ed.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+
+        // Sequences
+        for s in &diff.added_sequences {
+            changes.push(CiChange {
+                change_type: "ADD".to_string(),
+                object: "SEQUENCE".to_string(),
+                table: String::new(),
+                name: s.name.clone(),
+                description: format!("ADD SEQUENCE {}", s.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
+        for s in &diff.removed_sequences {
+            changes.push(CiChange {
+                change_type: "DROP".to_string(),
+                object: "SEQUENCE".to_string(),
+                table: String::new(),
+                name: s.name.clone(),
+                description: format!("DROP SEQUENCE {}", s.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
         }
 
         let blocking: Vec<CiChange> = changes.iter().filter(|c| c.is_blocking).cloned().collect();

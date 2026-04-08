@@ -228,8 +228,9 @@ fn load_views(conn: &Connection, schema: &mut Schema) -> Result<(), DbDiffError>
         .collect();
 
     for (name, sql) in views {
-        // Extract definition from "CREATE VIEW name AS ..."
-        let definition = sql
+        // Extract definition from "CREATE VIEW name AS ..." (case-insensitive)
+        let upper = sql.to_uppercase();
+        let definition = upper
             .find(" AS ")
             .map(|pos| sql[pos + 4..].to_string())
             .unwrap_or(sql);
