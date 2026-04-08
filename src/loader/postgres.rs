@@ -166,7 +166,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         }
     }
 
-    // Load FK and UNIQUE constraints using pg_constraint for correct composite FK mapping.
+    // Load PK, FK, and UNIQUE constraints using pg_constraint.
     // pg_constraint.conkey/confkey arrays preserve positional column correspondence.
     let rows = client
         .query(
@@ -189,7 +189,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
              JOIN pg_class rel ON con.conrelid = rel.oid \
              JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \
              LEFT JOIN pg_class frel ON con.confrelid = frel.oid \
-             WHERE nsp.nspname = 'public' AND con.contype IN ('f', 'u') \
+             WHERE nsp.nspname = 'public' AND con.contype IN ('p', 'f', 'u') \
              ORDER BY rel.relname, con.conname",
             &[],
         )
@@ -201,7 +201,18 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         let contype: String = row.get("contype");
         let columns: Vec<String> = row.get("columns");
 
-        if contype == "f" {
+        if contype == "p" {
+            if let Some(table) = schema.tables.get_mut(&table_name) {
+                table.constraints.insert(
+                    constraint_name.clone(),
+                    Constraint {
+                        name: constraint_name,
+                        table_name: table_name.clone(),
+                        kind: ConstraintKind::PrimaryKey { columns },
+                    },
+                );
+            }
+        } else if contype == "f" {
             let ref_table: String = row.get("ref_table");
             let ref_columns: Vec<String> = row.get("ref_columns");
             let del_type: String = row.get("confdeltype");
@@ -336,7 +347,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
     // Load sequences
     let rows = client
         .query(
-            "SELECT sequencename, data_type, start_value, increment_by, min_value, max_value \
+            "SELECT sequencename, data_type::text, start_value, increment_by, min_value, max_value \
              FROM pg_sequences \
              WHERE schemaname = 'public' \
              ORDER BY sequencename",
@@ -346,20 +357,27 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
 
     for row in &rows {
         let name: String = row.get("sequencename");
-        let data_type: String = row.get("data_type");
-        let start_value: i64 = row.get("start_value");
-        let increment: i64 = row.get("increment_by");
-        let min_value: i64 = row.get("min_value");
-        let max_value: i64 = row.get("max_value");
+        let data_type: Option<String> = row.get("data_type");
+        let start_value: Option<i64> = row.get("start_value");
+        let increment: Option<i64> = row.get("increment_by");
+        let min_value: Option<i64> = row.get("min_value");
+        let max_value: Option<i64> = row.get("max_value");
+        if data_type.is_none() || start_value.is_none() {
+            eprintln!(
+                "Warning: sequence '{}' returned NULL metadata — the connected role \
+                 may lack USAGE privilege on this sequence. Falling back to defaults.",
+                name
+            );
+        }
         schema.sequences.insert(
             name.clone(),
             Sequence {
                 name,
-                data_type,
-                start_value,
-                increment,
-                min_value,
-                max_value,
+                data_type: data_type.unwrap_or_else(|| "bigint".to_string()),
+                start_value: start_value.unwrap_or(1),
+                increment: increment.unwrap_or(1),
+                min_value: min_value.unwrap_or(1),
+                max_value: max_value.unwrap_or(i64::MAX),
             },
         );
     }

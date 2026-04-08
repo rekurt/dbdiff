@@ -96,9 +96,48 @@ impl CiReport {
             });
         }
 
+        // Renamed tables
+        for rename in &diff.renamed_tables {
+            let stmt = statements.iter().find(|s| {
+                s.sql.contains("RENAME") && s.sql.contains(&rename.old_name)
+            });
+            changes.push(CiChange {
+                change_type: "RENAME".to_string(),
+                object: "TABLE".to_string(),
+                table: rename.old_name.clone(),
+                name: rename.new_name.clone(),
+                description: format!(
+                    "RENAME TABLE {} → {}",
+                    rename.old_name, rename.new_name
+                ),
+                is_blocking: false,
+                sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+            });
+        }
+
         // Modified tables
         for table_diff in &diff.modified_tables {
             let tname = &table_diff.table_name;
+
+            for rename in &table_diff.renamed_columns {
+                let stmt = statements.iter().find(|s| {
+                    s.sql.contains("RENAME COLUMN")
+                        && s.sql.contains(&rename.old.name)
+                        && s.sql.contains(tname.as_str())
+                });
+                changes.push(CiChange {
+                    change_type: "RENAME".to_string(),
+                    object: "COLUMN".to_string(),
+                    table: tname.clone(),
+                    name: format!("{} → {}", rename.old.name, rename.new.name),
+                    description: format!(
+                        "RENAME COLUMN {} → {} ({} confidence)",
+                        rename.old.name, rename.new.name, rename.confidence
+                    ),
+                    is_blocking: false,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+                });
+            }
 
             for col in &table_diff.added_columns {
                 let stmt = statements.iter().find(|s| {
@@ -119,22 +158,20 @@ impl CiReport {
             }
 
             for col in &table_diff.removed_columns {
+                let stmt = statements.iter().find(|s| {
+                    s.sql.contains("DROP COLUMN")
+                        && s.sql.contains(&col.name)
+                        && s.sql.contains(tname.as_str())
+                });
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(true);
                 changes.push(CiChange {
                     change_type: "DROP".to_string(),
                     object: "COLUMN".to_string(),
                     table: tname.clone(),
                     name: col.name.clone(),
                     description: format!("DROP COLUMN {}", col.name),
-                    is_blocking: false,
-                    sql: statements
-                        .iter()
-                        .find(|s| {
-                            s.sql.contains("DROP COLUMN")
-                                && s.sql.contains(&col.name)
-                                && s.sql.contains(tname.as_str())
-                        })
-                        .map(|s| s.sql.clone())
-                        .unwrap_or_default(),
+                    is_blocking: blocking,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
 
@@ -397,7 +434,7 @@ mod tests {
     fn exit_ok_for_identical_schemas() {
         let schema = Schema::new();
         let diff = diff_schemas(&schema, &schema);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(report.equal);
@@ -424,7 +461,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(!report.equal);
@@ -452,7 +489,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(!report.equal);
@@ -470,7 +507,7 @@ mod tests {
         right.tables.insert("x".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(report.summary.contains("1 change(s) detected"));
@@ -485,7 +522,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         let json = serde_json::to_string_pretty(&report).unwrap();
@@ -503,7 +540,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         let yaml = serde_yaml::to_string(&report).unwrap();

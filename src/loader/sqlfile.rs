@@ -225,7 +225,22 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
         });
     }
 
-    // PRIMARY KEY — skip (we don't diff PKs)
+    // PRIMARY KEY (col1, col2)
+    let pk_re =
+        Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)").ok()?;
+    if let Some(cap) = pk_re.captures(def) {
+        let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| format!("{}_pkey", table_name));
+        return Some(Constraint {
+            name,
+            table_name: table_name.to_string(),
+            kind: ConstraintKind::PrimaryKey { columns },
+        });
+    }
+
     None
 }
 

@@ -90,6 +90,43 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         }
     }
 
+    // Load primary key constraints
+    let pk_rows: Vec<(String, String)> = conn
+        .exec(
+            "SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             JOIN information_schema.KEY_COLUMN_USAGE kcu \
+               ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+               AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
+               AND tc.TABLE_NAME = kcu.TABLE_NAME \
+             WHERE tc.TABLE_SCHEMA = :db AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY' \
+             ORDER BY kcu.TABLE_NAME, kcu.ORDINAL_POSITION",
+            mysql_async::params! { "db" => &db_name },
+        )
+        .await?;
+
+    let mut pk_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (table_name, column_name) in &pk_rows {
+        pk_map
+            .entry(table_name.clone())
+            .or_default()
+            .push(column_name.clone());
+    }
+
+    for (table_name, columns) in pk_map {
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            let pk_name = format!("{}_pkey", table_name);
+            table.constraints.insert(
+                pk_name.clone(),
+                Constraint {
+                    name: pk_name,
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::PrimaryKey { columns },
+                },
+            );
+        }
+    }
+
     // Load foreign key constraints
     let fk_rows: Vec<(String, String, String, String, String, String, String)> = conn
         .exec(
