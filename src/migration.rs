@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
 use crate::loader::SqlDialect;
 use crate::model::{Column, Index, Table};
@@ -21,6 +23,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -45,6 +48,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     quote_ident(&col.name, dialect)
                 ),
                 warnings,
+                is_blocking: false,
             });
         }
     }
@@ -57,6 +61,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 "Dropping table '{}' will permanently delete all data.",
                 table.name
             )],
+            is_blocking: true, // DROP TABLE acquires AccessExclusiveLock
         });
     }
 
@@ -65,6 +70,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
             warnings: Vec::new(),
+            is_blocking: false, // CREATE TABLE on new table is non-blocking
         });
 
         // Indexes for new table
@@ -72,6 +78,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false, // Index on brand-new table is non-blocking
             });
         }
     }
@@ -80,6 +87,8 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     for table_diff in &diff.modified_tables {
         for col in &table_diff.added_columns {
             let warnings = add_column_warnings(col);
+            // ADD COLUMN ... NOT NULL requires table rewrite / AccessExclusiveLock
+            let blocking = !col.is_nullable;
             statements.push(MigrationStatement {
                 sql: format!(
                     "ALTER TABLE {} ADD COLUMN {};",
@@ -87,6 +96,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     column_definition_sql(col, dialect)
                 ),
                 warnings,
+                is_blocking: blocking,
             });
         }
     }
@@ -106,6 +116,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     "Consider using CREATE INDEX CONCURRENTLY to avoid locking the table."
                         .to_string(),
                 ],
+                is_blocking: true, // CREATE INDEX (without CONCURRENTLY) blocks writes
             });
         }
     }
@@ -114,16 +125,27 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 }
 
 /// A single migration SQL statement with optional safety warnings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MigrationStatement {
     pub sql: String,
     pub warnings: Vec<String>,
+    /// Whether this statement acquires heavy locks (e.g. AccessExclusiveLock)
+    /// or performs a full table rewrite.
+    pub is_blocking: bool,
 }
 
-fn quote_ident(ident: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::MySql => format!("`{}`", ident.replace('`', "``")),
-        _ => format!("\"{}\"", ident.replace('"', "\"\"")),
+fn quote_ident(name: &str, dialect: SqlDialect) -> String {
+    let needs_quoting = name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if needs_quoting {
+        match dialect {
+            SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
+            _ => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    } else {
+        name.to_string()
     }
 }
 
@@ -153,12 +175,20 @@ fn create_table_sql(table: &Table, dialect: SqlDialect) -> String {
 
 fn create_index_sql(idx: &Index, dialect: SqlDialect) -> String {
     let unique = if idx.is_unique { "UNIQUE " } else { "" };
-    let cols = idx
-        .columns
-        .iter()
-        .map(|c| quote_ident(c, dialect))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // PostgreSQL index columns are raw SQL clauses from pg_get_indexdef() and may
+    // contain expressions (lower(email)), sort orders (created_at DESC), or
+    // already-quoted identifiers — they must NOT be wrapped with quote_ident.
+    // MySQL/SQLite index columns are plain identifier names from information_schema
+    // and need proper quoting.
+    let cols = match dialect {
+        SqlDialect::Postgres | SqlDialect::SqlFile => idx.columns.join(", "),
+        _ => idx
+            .columns
+            .iter()
+            .map(|c| quote_ident(c, dialect))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
     format!(
         "CREATE {unique}INDEX {} ON {}({});",
         quote_ident(&idx.name, dialect),
@@ -207,7 +237,7 @@ fn generate_column_alterations(
         let ColumnDiff { old, new } = col_diff;
         let table = &table_diff.table_name;
 
-        // Type change
+        // Type change — blocking: requires table rewrite / AccessExclusiveLock
         if old.data_type != new.data_type {
             match dialect {
                 SqlDialect::MySql => stmts.push(MigrationStatement {
@@ -221,6 +251,7 @@ fn generate_column_alterations(
                          and table lock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
                 SqlDialect::Sqlite => stmts.push(MigrationStatement {
                     sql: format!(
@@ -233,6 +264,7 @@ fn generate_column_alterations(
                          Recreate table '{table}' with the desired column definition.",
                         new.name
                     )],
+                    is_blocking: true,
                 }),
                 _ => stmts.push(MigrationStatement {
                     sql: format!(
@@ -246,12 +278,16 @@ fn generate_column_alterations(
                          and AccessExclusiveLock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
             }
         }
 
         // Nullability change
         if old.is_nullable != new.is_nullable {
+            // SET NOT NULL is blocking (full table scan + AccessExclusiveLock)
+            // DROP NOT NULL is non-blocking
+            let blocking = !new.is_nullable;
             match dialect {
                 SqlDialect::MySql => {
                     let warning = if new.is_nullable {
@@ -274,6 +310,7 @@ fn generate_column_alterations(
                             column_definition_sql(new, dialect)
                         ),
                         warnings: vec![warning],
+                        is_blocking: blocking,
                     });
                 }
                 SqlDialect::Sqlite => {
@@ -288,6 +325,7 @@ fn generate_column_alterations(
                              Recreate table '{table}' with the desired column definition.",
                             new.name
                         )],
+                        is_blocking: blocking,
                     });
                 }
                 _ => {
@@ -299,6 +337,7 @@ fn generate_column_alterations(
                                 quote_ident(&new.name, dialect)
                             ),
                             warnings: Vec::new(),
+                            is_blocking: false,
                         });
                     } else {
                         stmts.push(MigrationStatement {
@@ -312,13 +351,14 @@ fn generate_column_alterations(
                                  This acquires AccessExclusiveLock.",
                                 new.name
                             )],
+                            is_blocking: true,
                         });
                     }
                 }
             }
         }
 
-        // Default change
+        // Default change — non-blocking (metadata-only on modern PG)
         if old.default != new.default {
             match &new.default {
                 Some(default) => {
@@ -329,6 +369,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
                 None => {
@@ -339,6 +380,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
             }
@@ -385,7 +427,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE \"users\" ADD COLUMN \"email\" varchar(255) NOT NULL;"
+            "ALTER TABLE users ADD COLUMN email varchar(255) NOT NULL;"
         );
         assert!(!stmts[0].warnings.is_empty()); // NOT NULL without DEFAULT warning
     }
@@ -410,10 +452,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "ALTER TABLE \"users\" DROP COLUMN \"old_field\";"
-        );
+        assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
         assert!(stmts[0].warnings[0].contains("destructive"));
     }
 
@@ -433,9 +472,9 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].sql.starts_with("CREATE TABLE \"orders\""));
-        assert!(stmts[0].sql.contains("\"id\" serial NOT NULL"));
-        assert!(stmts[0].sql.contains("\"total\" numeric(10,2) NOT NULL"));
+        assert!(stmts[0].sql.starts_with("CREATE TABLE orders"));
+        assert!(stmts[0].sql.contains("id serial NOT NULL"));
+        assert!(stmts[0].sql.contains("total numeric(10,2) NOT NULL"));
     }
 
     #[test]
@@ -458,7 +497,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE \"users\" ALTER COLUMN \"email\" TYPE varchar(255);"
+            "ALTER TABLE users ALTER COLUMN email TYPE varchar(255);"
         );
     }
 
@@ -489,10 +528,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "CREATE INDEX \"idx_orders_id\" ON \"orders\"(\"id\");"
-        );
+        assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
     }
 
     #[test]
@@ -575,7 +611,7 @@ mod tests {
         let diff = diff_schemas(&left, &right);
         let stmts = generate_migration(&diff, SqlDialect::MySql);
 
-        assert_eq!(stmts[0].sql, "DROP INDEX `idx_orders_id` ON `orders`;");
+        assert_eq!(stmts[0].sql, "DROP INDEX idx_orders_id ON orders;");
     }
 
     #[test]
@@ -619,7 +655,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert_eq!(
             stmts[0].sql,
-            "ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) NOT NULL;"
+            "ALTER TABLE users MODIFY COLUMN email varchar(255) NOT NULL;"
         );
     }
 
@@ -648,7 +684,194 @@ mod tests {
     }
 
     #[test]
-    fn postgres_identifiers_are_quoted_and_escaped() {
+    fn expression_index_columns_are_not_quoted() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        t.columns.insert(
+            "created_at".into(),
+            col("created_at", "timestamptz", false, None),
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), col("email", "text", false, None));
+        t.columns.insert(
+            "created_at".into(),
+            col("created_at", "timestamptz", false, None),
+        );
+        // Expression index: lower(email)
+        t.indexes.insert(
+            "idx_users_email_lower".into(),
+            Index {
+                name: "idx_users_email_lower".into(),
+                table_name: "users".into(),
+                columns: vec!["lower(email)".into()],
+                is_unique: false,
+            },
+        );
+        // Sorted index: created_at DESC
+        t.indexes.insert(
+            "idx_users_created_at_desc".into(),
+            Index {
+                name: "idx_users_created_at_desc".into(),
+                table_name: "users".into(),
+                columns: vec!["created_at DESC".into()],
+                is_unique: false,
+            },
+        );
+        // Already-quoted identifier from pg_indexes
+        t.indexes.insert(
+            "idx_users_mixed".into(),
+            Index {
+                name: "idx_users_mixed".into(),
+                table_name: "users".into(),
+                columns: vec!["\"Email\"".into(), "created_at DESC".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+
+        let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+
+        // Expression index — column clause must not be quoted
+        assert!(sqls.contains(&"CREATE INDEX idx_users_email_lower ON users(lower(email));"));
+        // Sorted index — DESC must not be quoted
+        assert!(sqls.contains(&"CREATE INDEX idx_users_created_at_desc ON users(created_at DESC);"));
+        // Mixed: already-quoted ident + sort order
+        assert!(
+            sqls.contains(&"CREATE INDEX idx_users_mixed ON users(\"Email\", created_at DESC);")
+        );
+    }
+
+    #[test]
+    fn mysql_migration_uses_backtick_quoting_for_camelcase() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("UserAccounts");
+        t.columns
+            .insert("UserId".into(), col("UserId", "int", false, None));
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", true, None));
+        t.indexes.insert(
+            "idx_UserAccounts_email".into(),
+            Index {
+                name: "idx_UserAccounts_email".into(),
+                table_name: "UserAccounts".into(),
+                columns: vec!["email".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("UserAccounts".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+        // Table and column names with uppercase must use backticks, not double quotes
+        assert!(sqls.iter().any(|s| s.contains("`UserAccounts`")));
+        assert!(sqls.iter().any(|s| s.contains("`UserId`")));
+        assert!(sqls.iter().any(|s| s.contains("`idx_UserAccounts_email`")));
+        // Must NOT contain double-quoted identifiers
+        assert!(!sqls.iter().any(|s| s.contains("\"UserAccounts\"")));
+        assert!(!sqls.iter().any(|s| s.contains("\"UserId\"")));
+    }
+
+    #[test]
+    fn mysql_index_columns_are_quoted() {
+        // MySQL index columns are plain identifiers from information_schema,
+        // not raw SQL — they must be quoted when needed.
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("items");
+        t.columns
+            .insert("Select".into(), col("Select", "varchar(50)", true, None));
+        t.indexes.insert(
+            "idx_items_select".into(),
+            Index {
+                name: "idx_items_select".into(),
+                table_name: "items".into(),
+                columns: vec!["Select".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("items".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
+        // Column name with uppercase must be backtick-quoted in MySQL index
+        assert!(sqls.iter().any(|s| s.contains("(`Select`)")));
+    }
+
+    #[test]
+    fn sqlfile_dialect_does_not_quote_simple_names() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::SqlFile);
+
+        // Simple lowercase names should not be quoted for SqlFile dialect
+        assert!(stmts[0].sql.contains("CREATE TABLE users"));
+        assert!(stmts[0].sql.contains("email text"));
+    }
+
+    #[test]
+    fn quote_ident_postgres() {
+        use super::quote_ident;
+        let pg = SqlDialect::Postgres;
+
+        // Simple names pass through unquoted
+        assert_eq!(quote_ident("users", pg), "users");
+        assert_eq!(quote_ident("idx_orders_id", pg), "idx_orders_id");
+
+        // Names with uppercase get double-quoted
+        assert_eq!(quote_ident("Users", pg), "\"Users\"");
+
+        // Names with spaces get double-quoted
+        assert_eq!(quote_ident("my table", pg), "\"my table\"");
+
+        // Names with embedded quotes get escaped
+        assert_eq!(quote_ident("a\"b", pg), "\"a\"\"b\"");
+
+        // Empty string gets quoted
+        assert_eq!(quote_ident("", pg), "\"\"");
+    }
+
+    #[test]
+    fn quote_ident_mysql_uses_backticks() {
+        use super::quote_ident;
+        let my = SqlDialect::MySql;
+
+        // Simple names pass through unquoted
+        assert_eq!(quote_ident("users", my), "users");
+
+        // Names needing quoting use backticks
+        assert_eq!(quote_ident("Users", my), "`Users`");
+        assert_eq!(quote_ident("my table", my), "`my table`");
+
+        // Embedded backtick gets escaped
+        assert_eq!(quote_ident("a`b", my), "`a``b`");
+    }
+
+    #[test]
+    fn postgres_identifiers_are_escaped_against_injection() {
         let left = Schema::new();
         let mut right = Schema::new();
         let mut t = Table::new("users\"; DROP TABLE payments; --");

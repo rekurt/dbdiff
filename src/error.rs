@@ -51,7 +51,12 @@ impl fmt::Display for DbDiffError {
             Self::Postgres(e) => write!(f, "PostgreSQL error: {}", format_error_chain(e)),
             #[cfg(feature = "postgres")]
             Self::PostgresConnect { host, source } => {
-                write!(f, "PostgreSQL connection to '{}' failed: {}", host, format_error_chain(source))
+                write!(
+                    f,
+                    "PostgreSQL connection to '{}' failed: {}",
+                    host,
+                    format_error_chain(source)
+                )
             }
             #[cfg(feature = "mysql")]
             Self::MySQL(e) => write!(f, "MySQL error: {}", format_error_chain(e)),

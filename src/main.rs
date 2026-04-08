@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use dbdiff::ci::{self, CiReport};
 use dbdiff::cli::{Args, OutputFormat};
 use dbdiff::config;
 use dbdiff::diff::diff_schemas;
@@ -14,22 +15,21 @@ use dbdiff::output;
 async fn main() -> ExitCode {
     let args = Args::parse();
 
-    if let Err(code) = run(args).await {
-        return code;
+    match run(args).await {
+        Ok(code) => ExitCode::from(code),
+        Err(code) => ExitCode::from(code),
     }
-
-    ExitCode::SUCCESS
 }
 
-async fn run(args: Args) -> Result<(), ExitCode> {
+async fn run(args: Args) -> Result<u8, u8> {
     let target_source = args.target_source().map_err(|msg| {
         eprintln!("Error: {msg}");
-        ExitCode::from(2)
+        ci::EXIT_ERROR
     })?;
 
     let cfg = config::load_config(&args.config).map_err(|e| {
         eprintln!("Error: {e}");
-        ExitCode::from(2)
+        ci::EXIT_ERROR
     })?;
 
     let (mut left, mut right) = tokio::try_join!(
@@ -38,7 +38,7 @@ async fn run(args: Args) -> Result<(), ExitCode> {
     )
     .map_err(|e| {
         eprintln!("Error: {e}");
-        ExitCode::from(2)
+        ci::EXIT_ERROR
     })?;
 
     config::filter::apply_ignore(&mut left.schema, &cfg.ignore);
@@ -58,11 +58,14 @@ async fn run(args: Args) -> Result<(), ExitCode> {
                 "Error: Cannot generate migration for mixed backends ({l:?} vs {r:?}). \
                  Compare like-for-like backends or use a .sql file for one side."
             );
-            return Err(ExitCode::from(2));
+            return Err(ci::EXIT_ERROR);
         }
     };
     let statements = generate_migration(&diff, migration_dialect);
     let format = args.resolve_format(&cfg.output.format);
+
+    // Build CI report (used for JSON/YAML output and exit code logic)
+    let report = CiReport::from_diff(&diff, &statements);
 
     match format {
         OutputFormat::Pretty => {
@@ -73,18 +76,12 @@ async fn run(args: Args) -> Result<(), ExitCode> {
             }
         }
         OutputFormat::Json => {
-            let json = serde_json::json!({
-                "diff": diff,
-                "migration": statements.iter().map(|s| &s.sql).collect::<Vec<_>>(),
-                "warnings": statements.iter()
-                    .flat_map(|s| s.warnings.iter())
-                    .collect::<Vec<_>>(),
-                "has_changes": !diff.is_empty(),
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json).unwrap_or_default()
-            );
+            let json = serde_json::to_string_pretty(&report).unwrap_or_default();
+            println!("{json}");
+        }
+        OutputFormat::Yaml => {
+            let yaml = serde_yaml::to_string(&report).unwrap_or_default();
+            print!("{yaml}");
         }
         OutputFormat::Sql => {
             print!("{}", output::migration_to_sql(&statements));
@@ -97,7 +94,7 @@ async fn run(args: Args) -> Result<(), ExitCode> {
             let sql = output::migration_to_sql(&statements);
             std::fs::write(path, sql).map_err(|e| {
                 eprintln!("Error writing migration file: {e}");
-                ExitCode::from(2)
+                ci::EXIT_ERROR
             })?;
             eprintln!("Migration written to {path}");
         } else {
@@ -105,10 +102,18 @@ async fn run(args: Args) -> Result<(), ExitCode> {
         }
     }
 
-    // CI mode: exit 1 if schemas differ
-    if args.ci && !diff.is_empty() {
-        return Err(ExitCode::from(1));
+    // GitHub Actions annotations (auto-detect from env)
+    if args.ci && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        report.emit_github_annotations();
     }
 
-    Ok(())
+    // CI mode: determine exit code from report
+    if args.ci {
+        let code = report.exit_code(args.fail_on_blocking);
+        if code != ci::EXIT_OK {
+            return Err(code);
+        }
+    }
+
+    Ok(ci::EXIT_OK)
 }
