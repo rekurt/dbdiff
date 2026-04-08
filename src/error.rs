@@ -71,15 +71,18 @@ impl DbDiffError {
     // -- Convenience constructors --
 
     pub fn connection(host: &str, source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        let msg = format!("Connection to '{}' failed", sanitize_dsn(host));
+        let safe_host = sanitize_dsn(host);
+        let msg = format!("Connection to '{}' failed", safe_host);
         let cause = format_error_chain(&source);
         let hint = if cause.contains("refused") {
             format!(
                 "Check that the database server is running and accepting connections.\n\
-                 Try: pg_isready -h {host} or mysql --host={host} --execute='SELECT 1'",
+                 Try: pg_isready -h {safe_host} or mysql --host={safe_host} --execute='SELECT 1'",
             )
         } else if cause.contains("not found") || cause.contains("resolve") {
-            format!("Host '{host}' could not be resolved. Check the hostname and DNS settings.")
+            format!(
+                "Host '{safe_host}' could not be resolved. Check the hostname and DNS settings."
+            )
         } else {
             "Check the connection string and ensure the database server is reachable.".to_string()
         };

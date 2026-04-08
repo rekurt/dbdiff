@@ -87,6 +87,21 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     config::filter::apply_ignore(&mut left.schema, &cfg.ignore);
     config::filter::apply_ignore(&mut right.schema, &cfg.ignore);
 
+    // When comparing against SQL files, clear object types that the SQL parser
+    // cannot load (views, enums, sequences) to avoid false diffs.
+    if left.dialect == SqlDialect::SqlFile || right.dialect == SqlDialect::SqlFile {
+        if left.dialect == SqlDialect::SqlFile {
+            right.schema.views.clear();
+            right.schema.enums.clear();
+            right.schema.sequences.clear();
+        }
+        if right.dialect == SqlDialect::SqlFile {
+            left.schema.views.clear();
+            left.schema.enums.clear();
+            left.schema.sequences.clear();
+        }
+    }
+
     if let Some(false) = cfg.output.color {
         colored::control::set_override(false);
     }

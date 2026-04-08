@@ -34,12 +34,12 @@ async fn connect(dsn: &str, ssl_mode: PgSslMode) -> Result<Client, DbDiffError> 
         PgSslMode::Disable => connect_no_tls(dsn, &host).await,
         PgSslMode::Prefer => {
             // Try TLS first, fall back to plaintext
-            match connect_tls(dsn, &host).await {
+            match connect_tls(dsn, &host, true).await {
                 Ok(client) => Ok(client),
                 Err(_) => connect_no_tls(dsn, &host).await,
             }
         }
-        PgSslMode::Require => connect_tls(dsn, &host).await,
+        PgSslMode::Require => connect_tls(dsn, &host, false).await,
     }
 }
 
@@ -58,9 +58,13 @@ async fn connect_no_tls(dsn: &str, host: &str) -> Result<Client, DbDiffError> {
     Ok(client)
 }
 
-async fn connect_tls(dsn: &str, host: &str) -> Result<Client, DbDiffError> {
+async fn connect_tls(
+    dsn: &str,
+    host: &str,
+    accept_invalid_certs: bool,
+) -> Result<Client, DbDiffError> {
     let tls_connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(accept_invalid_certs)
         .build()
         .map_err(|e| DbDiffError::connection(dsn, e))?;
     let connector = postgres_native_tls::MakeTlsConnector::new(tls_connector);
