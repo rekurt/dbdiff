@@ -116,8 +116,15 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     }
 
     let migration_dialect = match (left.dialect, right.dialect) {
+        // Both non-DB sources: default to PostgreSQL (most standards-compliant SQL)
+        (
+            SqlDialect::SqlFile | SqlDialect::Snapshot,
+            SqlDialect::SqlFile | SqlDialect::Snapshot,
+        ) => SqlDialect::Postgres,
+        // One side is a file/snapshot: use the other side's dialect
         (SqlDialect::SqlFile | SqlDialect::Snapshot, other)
         | (other, SqlDialect::SqlFile | SqlDialect::Snapshot) => other,
+        // Both live DBs: must be same dialect
         (l, r) if l == r => l,
         (l, r) => {
             eprintln!(
