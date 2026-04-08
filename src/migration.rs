@@ -70,7 +70,16 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         }
     }
 
-    // Phase 4: DROP TABLEs
+    // Phase 4: DROP removed views (before tables, since views may depend on tables)
+    for view in &diff.removed_views {
+        statements.push(MigrationStatement {
+            sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // Phase 5: DROP TABLEs
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
             sql: format!("DROP TABLE {};", quote_ident(&table.name, dialect)),
@@ -79,15 +88,6 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 table.name
             )],
             is_blocking: true, // DROP TABLE acquires AccessExclusiveLock
-        });
-    }
-
-    // Phase 5: DROP removed views, enums, sequences
-    for view in &diff.removed_views {
-        statements.push(MigrationStatement {
-            sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
-            warnings: Vec::new(),
-            is_blocking: false,
         });
     }
     for e in &diff.removed_enums {
@@ -544,11 +544,33 @@ fn add_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
 }
 
 fn drop_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
-    format!(
-        "ALTER TABLE {} DROP CONSTRAINT {};",
-        quote_ident(&c.table_name, dialect),
-        quote_ident(&c.name, dialect)
-    )
+    match dialect {
+        SqlDialect::MySql => {
+            // MySQL uses DROP FOREIGN KEY for FKs, DROP INDEX for unique constraints
+            match &c.kind {
+                ConstraintKind::ForeignKey { .. } => format!(
+                    "ALTER TABLE {} DROP FOREIGN KEY {};",
+                    quote_ident(&c.table_name, dialect),
+                    quote_ident(&c.name, dialect)
+                ),
+                ConstraintKind::Unique { .. } => format!(
+                    "ALTER TABLE {} DROP INDEX {};",
+                    quote_ident(&c.table_name, dialect),
+                    quote_ident(&c.name, dialect)
+                ),
+                ConstraintKind::Check { .. } => format!(
+                    "ALTER TABLE {} DROP CHECK {};",
+                    quote_ident(&c.table_name, dialect),
+                    quote_ident(&c.name, dialect)
+                ),
+            }
+        }
+        _ => format!(
+            "ALTER TABLE {} DROP CONSTRAINT {};",
+            quote_ident(&c.table_name, dialect),
+            quote_ident(&c.name, dialect)
+        ),
+    }
 }
 
 fn add_column_warnings(col: &Column) -> Vec<String> {

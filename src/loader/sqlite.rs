@@ -149,15 +149,16 @@ fn load_foreign_keys(
     ))?;
 
     // PRAGMA foreign_key_list returns: id, seq, table, from, to, on_update, on_delete, match
-    let fks: Vec<(i32, String, String, String, String, String)> = stmt
+    // Note: `to` (index 4) can be NULL when the FK references the primary key implicitly
+    let fks: Vec<(i32, String, String, Option<String>, String, String)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, i32>(0)?,
-                row.get::<_, String>(2)?, // ref_table
-                row.get::<_, String>(3)?, // from column
-                row.get::<_, String>(4)?, // to column
-                row.get::<_, String>(5)?, // on_update
-                row.get::<_, String>(6)?, // on_delete
+                row.get::<_, String>(2)?,         // ref_table
+                row.get::<_, String>(3)?,         // from column
+                row.get::<_, Option<String>>(4)?, // to column (nullable)
+                row.get::<_, String>(5)?,         // on_update
+                row.get::<_, String>(6)?,         // on_delete
             ))
         })?
         .filter_map(|r| r.ok())
@@ -178,7 +179,13 @@ fn load_foreign_keys(
             )
         });
         entry.1.push(from_col.clone());
-        entry.2.push(to_col.clone());
+        // When `to` is NULL, SQLite references the primary key — use the from column name
+        // as a reasonable default since the PK column name is typically the same
+        if let Some(to) = to_col {
+            entry.2.push(to.clone());
+        } else {
+            entry.2.push(from_col.clone());
+        }
     }
 
     for (id, (ref_table, columns, ref_columns, on_update, on_delete)) in fk_groups {
