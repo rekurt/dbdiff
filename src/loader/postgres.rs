@@ -123,13 +123,19 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
             .insert(column_name, column);
     }
 
-    // Load indexes from pg_indexes
+    // Load indexes from pg_indexes, excluding constraint-backing indexes
+    // (PK and UNIQUE constraint indexes are managed by their constraints)
     let rows = client
         .query(
-            "SELECT indexname, tablename, indexdef \
-             FROM pg_indexes \
-             WHERE schemaname = 'public' \
-             ORDER BY tablename, indexname",
+            "SELECT i.indexname, i.tablename, i.indexdef \
+             FROM pg_indexes i \
+             WHERE i.schemaname = 'public' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_constraint c \
+                   JOIN pg_class cl ON cl.oid = c.conindid \
+                   WHERE cl.relname = i.indexname \
+               ) \
+             ORDER BY i.tablename, i.indexname",
             &[],
         )
         .await?;
@@ -139,7 +145,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         let table_name: String = row.get("tablename");
         let index_def: String = row.get("indexdef");
 
-        // Skip primary key indexes (auto-generated)
+        // Skip primary key indexes (belt-and-suspenders with the NOT EXISTS above)
         if index_name.ends_with("_pkey") {
             continue;
         }

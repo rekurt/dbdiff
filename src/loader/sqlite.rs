@@ -229,9 +229,12 @@ fn load_views(conn: &Connection, schema: &mut Schema) -> Result<(), DbDiffError>
 
     for (name, sql) in views {
         // Extract definition from "CREATE VIEW name AS ..." (case-insensitive)
-        let upper = sql.to_uppercase();
-        let definition = upper
-            .find(" AS ")
+        // Use ASCII case-insensitive byte search to avoid byte-offset mismatch
+        // from non-ASCII characters that change length under to_uppercase().
+        let definition = sql
+            .as_bytes()
+            .windows(4)
+            .position(|w| w.eq_ignore_ascii_case(b" AS "))
             .map(|pos| sql[pos + 4..].to_string())
             .unwrap_or(sql);
         schema.views.insert(

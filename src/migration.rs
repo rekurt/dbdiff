@@ -520,6 +520,12 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         }
     }
 
+    // 16b. Revert modified columns to old definition
+    for table_diff in &diff.modified_tables {
+        let mut revert_stmts = generate_column_alterations_reversed(table_diff, dialect);
+        statements.append(&mut revert_stmts);
+    }
+
     // 17. Re-add removed constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.removed_constraints {
@@ -761,6 +767,33 @@ fn add_column_warnings(col: &Column) -> Vec<String> {
         ));
     }
     warnings
+}
+
+/// Generate ALTER statements to revert modified columns to their old definitions (for rollback).
+fn generate_column_alterations_reversed(
+    table_diff: &TableDiff,
+    dialect: SqlDialect,
+) -> Vec<MigrationStatement> {
+    // Swap old<->new in each ColumnDiff, then reuse the forward logic
+    let reversed = crate::diff::TableDiff {
+        table_name: table_diff.table_name.clone(),
+        added_columns: Vec::new(),
+        removed_columns: Vec::new(),
+        modified_columns: table_diff
+            .modified_columns
+            .iter()
+            .map(|cd| crate::diff::ColumnDiff {
+                old: cd.new.clone(),
+                new: cd.old.clone(),
+            })
+            .collect(),
+        unchanged_columns: Vec::new(),
+        added_indexes: Vec::new(),
+        removed_indexes: Vec::new(),
+        added_constraints: Vec::new(),
+        removed_constraints: Vec::new(),
+    };
+    generate_column_alterations(&reversed, dialect)
 }
 
 fn generate_column_alterations(
