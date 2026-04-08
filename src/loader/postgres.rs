@@ -155,115 +155,87 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         }
     }
 
-    // Load foreign key constraints
+    // Load FK and UNIQUE constraints using pg_constraint for correct composite FK mapping.
+    // pg_constraint.conkey/confkey arrays preserve positional column correspondence.
     let rows = client
         .query(
-            "SELECT tc.constraint_name, tc.table_name, \
-                    kcu.column_name, \
-                    ccu.table_name AS ref_table, \
-                    ccu.column_name AS ref_column, \
-                    rc.delete_rule, rc.update_rule \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage kcu \
-               ON tc.constraint_name = kcu.constraint_name \
-               AND tc.table_schema = kcu.table_schema \
-               AND tc.table_name = kcu.table_name \
-             JOIN information_schema.constraint_column_usage ccu \
-               ON ccu.constraint_name = tc.constraint_name \
-               AND ccu.table_schema = tc.table_schema \
-             LEFT JOIN information_schema.referential_constraints rc \
-               ON rc.constraint_name = tc.constraint_name \
-               AND rc.constraint_schema = tc.table_schema \
-             WHERE tc.table_schema = 'public' \
-               AND tc.constraint_type IN ('FOREIGN KEY', 'UNIQUE') \
-             ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position",
+            "SELECT con.conname AS constraint_name, \
+                    rel.relname AS table_name, \
+                    con.contype, \
+                    ( \
+                        SELECT array_agg(att.attname ORDER BY u.ord) \
+                        FROM unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) \
+                        JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = u.attnum \
+                    ) AS columns, \
+                    frel.relname AS ref_table, \
+                    ( \
+                        SELECT array_agg(att.attname ORDER BY u.ord) \
+                        FROM unnest(con.confkey) WITH ORDINALITY AS u(attnum, ord) \
+                        JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = u.attnum \
+                    ) AS ref_columns, \
+                    con.confdeltype, con.confupdtype \
+             FROM pg_constraint con \
+             JOIN pg_class rel ON con.conrelid = rel.oid \
+             JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \
+             LEFT JOIN pg_class frel ON con.confrelid = frel.oid \
+             WHERE nsp.nspname = 'public' AND con.contype IN ('f', 'u') \
+             ORDER BY rel.relname, con.conname",
             &[],
         )
         .await?;
 
-    // Group FK columns by constraint name
-    // (table, columns, ref_table, ref_columns, on_delete, on_update)
-    type FkEntry = (
-        String,
-        Vec<String>,
-        String,
-        Vec<String>,
-        Option<String>,
-        Option<String>,
-    );
-    // Key by (table_name, constraint_name) since constraint names are only unique per table
-    let mut fk_map: std::collections::BTreeMap<(String, String), FkEntry> =
-        std::collections::BTreeMap::new();
-    let mut unique_map: std::collections::BTreeMap<(String, String), Vec<String>> =
-        std::collections::BTreeMap::new();
-
     for row in &rows {
         let constraint_name: String = row.get("constraint_name");
         let table_name: String = row.get("table_name");
-        let column_name: String = row.get("column_name");
-        let ref_table: String = row.get("ref_table");
-        let ref_column: String = row.get("ref_column");
-        let delete_rule: Option<String> = row.get("delete_rule");
-        let update_rule: Option<String> = row.get("update_rule");
+        let contype: String = row.get("contype");
+        let columns: Vec<String> = row.get("columns");
 
-        let key = (table_name.clone(), constraint_name.clone());
+        if contype == "f" {
+            let ref_table: String = row.get("ref_table");
+            let ref_columns: Vec<String> = row.get("ref_columns");
+            let del_type: String = row.get("confdeltype");
+            let upd_type: String = row.get("confupdtype");
 
-        if delete_rule.is_some() {
-            // FK constraint
-            let entry = fk_map.entry(key).or_insert_with(|| {
-                (
-                    table_name,
-                    Vec::new(),
-                    ref_table,
-                    Vec::new(),
-                    delete_rule.filter(|r| r != "NO ACTION"),
-                    update_rule.filter(|r| r != "NO ACTION"),
-                )
-            });
-            if !entry.1.contains(&column_name) {
-                entry.1.push(column_name);
-            }
-            if !entry.3.contains(&ref_column) {
-                entry.3.push(ref_column);
-            }
-        } else {
-            // UNIQUE constraint
-            let entry = unique_map.entry(key).or_default();
-            if !entry.contains(&column_name) {
-                entry.push(column_name);
-            }
-        }
-    }
+            let on_delete = match del_type.as_str() {
+                "c" => Some("CASCADE".to_string()),
+                "n" => Some("SET NULL".to_string()),
+                "d" => Some("SET DEFAULT".to_string()),
+                _ => None, // 'a' = NO ACTION, 'r' = RESTRICT
+            };
+            let on_update = match upd_type.as_str() {
+                "c" => Some("CASCADE".to_string()),
+                "n" => Some("SET NULL".to_string()),
+                "d" => Some("SET DEFAULT".to_string()),
+                _ => None,
+            };
 
-    for ((table_name, name), (_, columns, ref_table, ref_columns, on_delete, on_update)) in fk_map {
-        if let Some(table) = schema.tables.get_mut(&table_name) {
-            table.constraints.insert(
-                name.clone(),
-                Constraint {
-                    name: name.clone(),
-                    table_name: table_name.clone(),
-                    kind: ConstraintKind::ForeignKey {
-                        columns,
-                        ref_table,
-                        ref_columns,
-                        on_delete,
-                        on_update,
+            if let Some(table) = schema.tables.get_mut(&table_name) {
+                table.constraints.insert(
+                    constraint_name.clone(),
+                    Constraint {
+                        name: constraint_name,
+                        table_name: table_name.clone(),
+                        kind: ConstraintKind::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                            on_delete,
+                            on_update,
+                        },
                     },
-                },
-            );
-        }
-    }
-
-    for ((table_name, name), columns) in unique_map {
-        if let Some(table) = schema.tables.get_mut(&table_name) {
-            table.constraints.insert(
-                name.clone(),
-                Constraint {
-                    name: name.clone(),
-                    table_name: table_name.clone(),
-                    kind: ConstraintKind::Unique { columns },
-                },
-            );
+                );
+            }
+        } else if contype == "u" {
+            if let Some(table) = schema.tables.get_mut(&table_name) {
+                table.constraints.insert(
+                    constraint_name.clone(),
+                    Constraint {
+                        name: constraint_name,
+                        table_name: table_name.clone(),
+                        kind: ConstraintKind::Unique { columns },
+                    },
+                );
+            }
         }
     }
 

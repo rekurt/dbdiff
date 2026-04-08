@@ -304,14 +304,15 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 
 /// Generate rollback (DOWN) migration that reverses the diff.
 ///
-/// Order: drop added views -> drop added enums/sequences -> drop added constraints/indexes ->
-/// drop added columns -> drop added tables -> recreate removed tables ->
-/// re-add removed columns -> recreate removed enums/sequences ->
-/// recreate removed constraints/indexes -> recreate removed views
+/// Order: drop added views -> drop added constraints/indexes ->
+/// drop added columns -> drop added tables -> drop added enums/sequences ->
+/// recreate removed enums/sequences -> recreate removed tables ->
+/// re-add removed columns -> recreate removed constraints/indexes ->
+/// recreate removed views
 pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
-    // 1. Drop views that were added (reverse of CREATE VIEW)
+    // 1. Drop views that were added
     for view in &diff.added_views {
         statements.push(MigrationStatement {
             sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
@@ -333,25 +334,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 3. Reverse added enums (drop them)
-    for e in &diff.added_enums {
-        statements.push(MigrationStatement {
-            sql: format!("DROP TYPE {};", quote_ident(&e.name, dialect)),
-            warnings: Vec::new(),
-            is_blocking: false,
-        });
-    }
-
-    // 4. Reverse added sequences (drop them)
-    for s in &diff.added_sequences {
-        statements.push(MigrationStatement {
-            sql: format!("DROP SEQUENCE {};", quote_ident(&s.name, dialect)),
-            warnings: Vec::new(),
-            is_blocking: false,
-        });
-    }
-
-    // 5. Drop added constraints
+    // 3. Drop added constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.added_constraints {
             statements.push(MigrationStatement {
@@ -388,7 +371,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         }
     }
 
-    // 8. Drop added tables
+    // 8. Drop added tables (before enums/sequences, since tables may depend on them)
     for table in &diff.added_tables {
         statements.push(MigrationStatement {
             sql: format!("DROP TABLE {};", quote_ident(&table.name, dialect)),
@@ -397,7 +380,25 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 9. Recreate removed tables (data is lost)
+    // 9. Drop added enums (after tables that use them are dropped)
+    for e in &diff.added_enums {
+        statements.push(MigrationStatement {
+            sql: format!("DROP TYPE {};", quote_ident(&e.name, dialect)),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 10. Drop added sequences (after tables that use them are dropped)
+    for s in &diff.added_sequences {
+        statements.push(MigrationStatement {
+            sql: format!("DROP SEQUENCE {};", quote_ident(&s.name, dialect)),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 11. Recreate removed tables (data is lost)
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),

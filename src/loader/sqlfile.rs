@@ -150,7 +150,9 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
                 )
             });
         let ref_table = cap[3].to_string();
-        // When ref columns are omitted, default to "id" (conventional PK)
+        // When ref columns are omitted, the FK targets the referenced table's PK.
+        // Use the source column names as a best-effort match (since the actual PK
+        // column names are not available without loading the referenced table).
         let ref_columns: Vec<String> = cap
             .get(4)
             .map(|m| {
@@ -159,7 +161,7 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
                     .map(|s| s.trim().to_string())
                     .collect()
             })
-            .unwrap_or_else(|| vec!["id".to_string()]);
+            .unwrap_or_else(|| columns.clone());
         let on_delete = cap
             .get(5)
             .map(|m| m.as_str().to_string())
