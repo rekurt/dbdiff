@@ -329,9 +329,16 @@ fn check_protected(
 fn column_is_protected(table_name: &str, col_name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pattern| {
         if let Some(c) = pattern.strip_prefix("*.") {
+            // *.column_name — matches column in any table
             col_name == c
         } else if let Some((t, c)) = pattern.split_once('.') {
-            table_name == t && col_name == c
+            if c == "*" {
+                // table.* — all columns in this table are protected
+                table_name == t
+            } else {
+                // table.column — exact match
+                table_name == t && col_name == c
+            }
         } else {
             false
         }

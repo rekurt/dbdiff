@@ -731,6 +731,11 @@ fn drop_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
                 ),
             }
         }
+        SqlDialect::Sqlite => format!(
+            "-- manual migration required: drop constraint {} on {} \
+             (SQLite does not support ALTER TABLE DROP CONSTRAINT; recreate the table)",
+            c.name, c.table_name
+        ),
         _ => format!(
             "ALTER TABLE {} DROP CONSTRAINT {};",
             quote_ident(&c.table_name, dialect),
