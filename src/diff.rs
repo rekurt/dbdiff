@@ -182,8 +182,16 @@ pub fn diff_schemas_with_options(
         // and emit modification entries under the new name so that migration
         // generation picks up these changes after the RENAME TABLE.
         for (old_table, new_table) in &rename_pairs {
-            let table_diff =
+            let mut table_diff =
                 diff_tables(&new_table.name, old_table, new_table, detect_renames);
+            // Rebase removed objects to the new table name so that DROP
+            // statements generated after RENAME TABLE target the correct name.
+            for idx in &mut table_diff.removed_indexes {
+                idx.table_name = new_table.name.clone();
+            }
+            for c in &mut table_diff.removed_constraints {
+                c.table_name = new_table.name.clone();
+            }
             if !table_diff.is_empty() {
                 modified_tables.push(table_diff);
             }
