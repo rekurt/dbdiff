@@ -169,8 +169,10 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         let s = &sd.new;
         statements.push(MigrationStatement {
             sql: format!(
-                "ALTER SEQUENCE {} INCREMENT {} MINVALUE {} MAXVALUE {};",
+                "ALTER SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {};",
                 quote_ident(&s.name, dialect),
+                s.data_type,
+                s.start_value,
                 s.increment,
                 s.min_value,
                 s.max_value
@@ -468,8 +470,10 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         let s = &sd.old;
         statements.push(MigrationStatement {
             sql: format!(
-                "ALTER SEQUENCE {} INCREMENT {} MINVALUE {} MAXVALUE {};",
+                "ALTER SEQUENCE {} AS {} START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {};",
                 quote_ident(&s.name, dialect),
+                s.data_type,
+                s.start_value,
                 s.increment,
                 s.min_value,
                 s.max_value

@@ -190,8 +190,10 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         Option<String>,
         Option<String>,
     );
-    let mut fk_map: std::collections::BTreeMap<String, FkEntry> = std::collections::BTreeMap::new();
-    let mut unique_map: std::collections::BTreeMap<String, (String, Vec<String>)> =
+    // Key by (table_name, constraint_name) since constraint names are only unique per table
+    let mut fk_map: std::collections::BTreeMap<(String, String), FkEntry> =
+        std::collections::BTreeMap::new();
+    let mut unique_map: std::collections::BTreeMap<(String, String), Vec<String>> =
         std::collections::BTreeMap::new();
 
     for row in &rows {
@@ -203,9 +205,11 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         let delete_rule: Option<String> = row.get("delete_rule");
         let update_rule: Option<String> = row.get("update_rule");
 
+        let key = (table_name.clone(), constraint_name.clone());
+
         if delete_rule.is_some() {
             // FK constraint
-            let entry = fk_map.entry(constraint_name).or_insert_with(|| {
+            let entry = fk_map.entry(key).or_insert_with(|| {
                 (
                     table_name,
                     Vec::new(),
@@ -223,16 +227,14 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
             }
         } else {
             // UNIQUE constraint
-            let entry = unique_map
-                .entry(constraint_name)
-                .or_insert_with(|| (table_name, Vec::new()));
-            if !entry.1.contains(&column_name) {
-                entry.1.push(column_name);
+            let entry = unique_map.entry(key).or_default();
+            if !entry.contains(&column_name) {
+                entry.push(column_name);
             }
         }
     }
 
-    for (name, (table_name, columns, ref_table, ref_columns, on_delete, on_update)) in fk_map {
+    for ((table_name, name), (_, columns, ref_table, ref_columns, on_delete, on_update)) in fk_map {
         if let Some(table) = schema.tables.get_mut(&table_name) {
             table.constraints.insert(
                 name.clone(),
@@ -251,7 +253,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         }
     }
 
-    for (name, (table_name, columns)) in unique_map {
+    for ((table_name, name), columns) in unique_map {
         if let Some(table) = schema.tables.get_mut(&table_name) {
             table.constraints.insert(
                 name.clone(),

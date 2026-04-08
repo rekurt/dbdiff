@@ -136,11 +136,18 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
         r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(\w+)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
     ).ok()?;
     if let Some(cap) = fk_re.captures(def) {
+        let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| format!("fk_{}_{}", table_name, cap[3].to_lowercase()));
-        let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
+            .unwrap_or_else(|| {
+                format!(
+                    "fk_{}_{}_{}",
+                    table_name,
+                    cap[3].to_lowercase(),
+                    columns.join("_")
+                )
+            });
         let ref_table = cap[3].to_string();
         let ref_columns: Vec<String> = cap[4].split(',').map(|s| s.trim().to_string()).collect();
         let on_delete = cap
