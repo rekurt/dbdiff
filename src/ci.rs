@@ -306,6 +306,17 @@ impl CiReport {
                 sql: String::new(),
             });
         }
+        for sd in &diff.modified_sequences {
+            changes.push(CiChange {
+                change_type: "ALTER".to_string(),
+                object: "SEQUENCE".to_string(),
+                table: String::new(),
+                name: sd.name.clone(),
+                description: format!("ALTER SEQUENCE {}", sd.name),
+                is_blocking: false,
+                sql: String::new(),
+            });
+        }
 
         let blocking: Vec<CiChange> = changes.iter().filter(|c| c.is_blocking).cloned().collect();
         let equal = diff.is_empty();

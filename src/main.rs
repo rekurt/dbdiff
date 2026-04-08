@@ -266,6 +266,25 @@ fn check_protected(
                 table.name
             ));
         }
+        // Check if any protected columns exist in dropped tables
+        for col in table.columns.values() {
+            for pattern in &protected.columns {
+                let matches = if let Some(col_name) = pattern.strip_prefix("*.") {
+                    col.name == col_name
+                } else if let Some((tbl, col_name)) = pattern.split_once('.') {
+                    table.name == tbl && col.name == col_name
+                } else {
+                    false
+                };
+                if matches {
+                    return Err(format!(
+                        "Protected column '{}.{}' would be dropped (table '{}' is being removed). \
+                         Remove it from the protected list to allow this.",
+                        table.name, col.name, table.name
+                    ));
+                }
+            }
+        }
     }
 
     for table_diff in &diff.modified_tables {
