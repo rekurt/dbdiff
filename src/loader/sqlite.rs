@@ -180,12 +180,12 @@ fn load_foreign_keys(
         });
         entry.1.push(from_col.clone());
         // When `to` is NULL, SQLite references the table's primary key implicitly.
-        // We use "id" as a conventional default — this is a best-effort mapping since
-        // SQLite doesn't expose the actual PK column name through foreign_key_list.
+        // Use the source column name as best-effort (matches common patterns like
+        // user_id -> user_id). The actual PK name isn't available from foreign_key_list.
         if let Some(to) = to_col {
             entry.2.push(to.clone());
         } else {
-            entry.2.push("id".to_string());
+            entry.2.push(from_col.clone());
         }
     }
 

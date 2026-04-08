@@ -475,7 +475,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 15. Recreate removed tables with their indexes and constraints
+    // 15. Recreate removed tables with indexes (constraints deferred to step 15b)
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
@@ -491,6 +491,9 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                 is_blocking: false,
             });
         }
+    }
+    // 15b. Add constraints for recreated tables (after ALL tables exist, so FK references resolve)
+    for table in &diff.removed_tables {
         for c in table.constraints.values() {
             statements.push(MigrationStatement {
                 sql: add_constraint_sql(c, dialect),

@@ -109,8 +109,8 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
 
     let diff = diff_schemas(&left.schema, &right.schema);
 
-    // Check protected objects
-    if let Err(msg) = check_protected(&diff, &cfg.protected) {
+    // Check protected objects based on migration direction
+    if let Err(msg) = check_protected(&diff, &cfg.protected, params.direction) {
         eprintln!("Error: {msg}");
         return Err(ExitCode::from(2));
     }
@@ -258,56 +258,84 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
 fn check_protected(
     diff: &dbdiff::diff::SchemaDiff,
     protected: &config::ProtectedConfig,
+    direction: MigrationDirection,
 ) -> Result<(), String> {
-    for table in &diff.removed_tables {
+    // In UP direction, removed_tables/removed_columns are dropped.
+    // In DOWN direction, added_tables/added_columns are dropped (rollback).
+    // In BOTH, check both directions.
+    let check_up = !matches!(direction, MigrationDirection::Down);
+    let check_down = !matches!(direction, MigrationDirection::Up);
+
+    // Check tables that would be dropped
+    let dropped_tables: Vec<&dbdiff::model::Table> = std::iter::empty()
+        .chain(if check_up {
+            diff.removed_tables.iter().collect::<Vec<_>>()
+        } else {
+            vec![]
+        })
+        .chain(if check_down {
+            diff.added_tables.iter().collect::<Vec<_>>()
+        } else {
+            vec![]
+        })
+        .collect();
+
+    for table in &dropped_tables {
         if protected.tables.contains(&table.name) {
             return Err(format!(
                 "Protected table '{}' would be dropped. Remove it from the protected list to allow this.",
                 table.name
             ));
         }
-        // Check if any protected columns exist in dropped tables
         for col in table.columns.values() {
-            for pattern in &protected.columns {
-                let matches = if let Some(col_name) = pattern.strip_prefix("*.") {
-                    col.name == col_name
-                } else if let Some((tbl, col_name)) = pattern.split_once('.') {
-                    table.name == tbl && col.name == col_name
-                } else {
-                    false
-                };
-                if matches {
-                    return Err(format!(
-                        "Protected column '{}.{}' would be dropped (table '{}' is being removed). \
-                         Remove it from the protected list to allow this.",
-                        table.name, col.name, table.name
-                    ));
-                }
+            if column_is_protected(&table.name, &col.name, &protected.columns) {
+                return Err(format!(
+                    "Protected column '{}.{}' would be dropped (table '{}' is being removed). \
+                     Remove it from the protected list to allow this.",
+                    table.name, col.name, table.name
+                ));
             }
         }
     }
 
+    // Check columns that would be dropped from modified tables
     for table_diff in &diff.modified_tables {
-        for col in &table_diff.removed_columns {
-            for pattern in &protected.columns {
-                let matches = if let Some(col_name) = pattern.strip_prefix("*.") {
-                    col.name == col_name
-                } else if let Some((table, col_name)) = pattern.split_once('.') {
-                    table_diff.table_name == table && col.name == col_name
-                } else {
-                    false
-                };
-                if matches {
-                    return Err(format!(
-                        "Protected column '{}.{}' would be dropped. Remove it from the protected list to allow this.",
-                        table_diff.table_name, col.name
-                    ));
-                }
+        let dropped_cols: Vec<&dbdiff::model::Column> = std::iter::empty()
+            .chain(if check_up {
+                table_diff.removed_columns.iter().collect::<Vec<_>>()
+            } else {
+                vec![]
+            })
+            .chain(if check_down {
+                table_diff.added_columns.iter().collect::<Vec<_>>()
+            } else {
+                vec![]
+            })
+            .collect();
+
+        for col in &dropped_cols {
+            if column_is_protected(&table_diff.table_name, &col.name, &protected.columns) {
+                return Err(format!(
+                    "Protected column '{}.{}' would be dropped. Remove it from the protected list to allow this.",
+                    table_diff.table_name, col.name
+                ));
             }
         }
     }
 
     Ok(())
+}
+
+fn column_is_protected(table_name: &str, col_name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        if let Some(c) = pattern.strip_prefix("*.") {
+            col_name == c
+        } else if let Some((t, c)) = pattern.split_once('.') {
+            table_name == t && col_name == c
+        } else {
+            false
+        }
+    })
 }
 
 async fn run_validate(args: ValidateArgs) -> Result<(), ExitCode> {
