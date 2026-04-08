@@ -133,7 +133,8 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
                AND NOT EXISTS ( \
                    SELECT 1 FROM pg_constraint c \
                    JOIN pg_class cl ON cl.oid = c.conindid \
-                   WHERE cl.relname = i.indexname \
+                   JOIN pg_namespace cnsp ON cl.relnamespace = cnsp.oid \
+                   WHERE cl.relname = i.indexname AND cnsp.nspname = 'public' \
                ) \
              ORDER BY i.tablename, i.indexname",
             &[],
