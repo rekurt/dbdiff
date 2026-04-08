@@ -3,7 +3,7 @@ use mysql_async::{Opts, OptsBuilder};
 use std::collections::BTreeMap;
 
 use crate::error::DbDiffError;
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{Column, Constraint, ConstraintKind, Index, Schema, Table, View};
 
 /// Load a schema from a live MySQL/MariaDB database via DSN.
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
@@ -88,6 +88,102 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         if let Some(table) = schema.tables.get_mut(&table_name) {
             table.indexes.insert(index_name, index);
         }
+    }
+
+    // Load foreign key constraints
+    let fk_rows: Vec<(String, String, String, String, String, String, String)> = conn
+        .exec(
+            "SELECT tc.CONSTRAINT_NAME, tc.TABLE_NAME, \
+                    kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME, \
+                    rc.DELETE_RULE, rc.UPDATE_RULE \
+             FROM information_schema.TABLE_CONSTRAINTS tc \
+             JOIN information_schema.KEY_COLUMN_USAGE kcu \
+               ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME \
+               AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+               ON rc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME \
+               AND rc.CONSTRAINT_SCHEMA = tc.TABLE_SCHEMA \
+             WHERE tc.TABLE_SCHEMA = :db AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY' \
+             ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+            mysql_async::params! { "db" => &db_name },
+        )
+        .await?;
+
+    type FkEntry = (
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let mut fk_map: BTreeMap<String, FkEntry> = BTreeMap::new();
+
+    for (cname, tname, col, ref_table, ref_col, del_rule, upd_rule) in &fk_rows {
+        let entry = fk_map.entry(cname.clone()).or_insert_with(|| {
+            (
+                tname.clone(),
+                Vec::new(),
+                ref_table.clone(),
+                Vec::new(),
+                if del_rule != "NO ACTION" && del_rule != "RESTRICT" {
+                    Some(del_rule.clone())
+                } else {
+                    None
+                },
+                if upd_rule != "NO ACTION" && upd_rule != "RESTRICT" {
+                    Some(upd_rule.clone())
+                } else {
+                    None
+                },
+            )
+        });
+        if !entry.1.contains(col) {
+            entry.1.push(col.clone());
+        }
+        if !entry.3.contains(ref_col) {
+            entry.3.push(ref_col.clone());
+        }
+    }
+
+    for (name, (table_name, columns, ref_table, ref_columns, on_delete, on_update)) in fk_map {
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            table.constraints.insert(
+                name.clone(),
+                Constraint {
+                    name: name.clone(),
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::ForeignKey {
+                        columns,
+                        ref_table,
+                        ref_columns,
+                        on_delete,
+                        on_update,
+                    },
+                },
+            );
+        }
+    }
+
+    // Load views
+    let view_rows: Vec<(String, String)> = conn
+        .exec(
+            "SELECT TABLE_NAME, VIEW_DEFINITION \
+             FROM information_schema.VIEWS \
+             WHERE TABLE_SCHEMA = :db \
+             ORDER BY TABLE_NAME",
+            mysql_async::params! { "db" => &db_name },
+        )
+        .await?;
+
+    for (name, definition) in &view_rows {
+        schema.views.insert(
+            name.clone(),
+            View {
+                name: name.clone(),
+                definition: definition.clone(),
+            },
+        );
     }
 
     pool.disconnect().await?;

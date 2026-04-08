@@ -5,8 +5,8 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use dbdiff::cli::{
-    Cli, DiffParams, MigrationDirection, OutputFormat, ResolvedCommand, SnapshotArgs, SslMode,
-    TablesArgs, ValidateArgs,
+    Cli, ColorMode, DiffParams, MigrationDirection, OutputFormat, ResolvedCommand, SnapshotArgs,
+    SslMode, TablesArgs, ValidateArgs,
 };
 use dbdiff::config;
 use dbdiff::diff::diff_schemas;
@@ -39,6 +39,9 @@ async fn main() -> ExitCode {
 }
 
 async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
+    // Apply color mode
+    apply_color_mode(params.color);
+
     if params.target_source.is_empty() {
         eprintln!("Error: Either a target DSN or --schema <file> is required");
         return Err(ExitCode::from(2));
@@ -115,11 +118,17 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         OutputFormat::Pretty => {
             output::print_diff(&diff);
 
+            let print_fn = if params.explain {
+                output::print_migration_explained
+            } else {
+                output::print_migration
+            };
+
             match params.direction {
                 MigrationDirection::Up => {
                     if !up_statements.is_empty() {
                         println!();
-                        output::print_migration(&up_statements);
+                        print_fn(&up_statements);
                     }
                 }
                 MigrationDirection::Down => {
@@ -132,7 +141,7 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
                             ))
                         );
                         println!();
-                        output::print_migration(&down_statements);
+                        print_fn(&down_statements);
                     }
                 }
                 MigrationDirection::Both => {
@@ -149,7 +158,7 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
                             ))
                         );
                         println!();
-                        output::print_migration(&down_statements);
+                        print_fn(&down_statements);
                     }
                 }
             }
@@ -404,6 +413,22 @@ fn run_init() -> Result<(), ExitCode> {
 
     eprintln!("Created {path}");
     Ok(())
+}
+
+fn apply_color_mode(mode: ColorMode) {
+    match mode {
+        ColorMode::Auto => {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                colored::control::set_override(false);
+            }
+        }
+        ColorMode::Always => {
+            colored::control::set_override(true);
+        }
+        ColorMode::Never => {
+            colored::control::set_override(false);
+        }
+    }
 }
 
 fn resolve_ssl_mode(mode: SslMode) -> loader::SslMode {

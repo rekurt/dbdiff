@@ -169,6 +169,60 @@ fn col_type_str(col: &Column) -> String {
     s
 }
 
+/// Generate an explanation for a migration SQL statement.
+pub fn explain_statement(sql: &str) -> &'static str {
+    let upper = sql.to_uppercase();
+    if upper.starts_with("DROP TABLE") {
+        "Removes the entire table and all its data permanently."
+    } else if upper.starts_with("DROP INDEX") {
+        "Removes the index. Queries using this index will fall back to sequential scan."
+    } else if upper.starts_with("DROP VIEW") {
+        "Removes the view. Queries referencing this view will fail."
+    } else if upper.starts_with("DROP TYPE") {
+        "Removes the enum type. Fails if any column still uses it."
+    } else if upper.starts_with("DROP SEQUENCE") {
+        "Removes the sequence. Fails if any column depends on it."
+    } else if upper.contains("DROP COLUMN") {
+        "Removes the column and all its data. This is irreversible."
+    } else if upper.contains("DROP CONSTRAINT") {
+        "Removes the constraint. Referential integrity will no longer be enforced."
+    } else if upper.starts_with("CREATE TABLE") {
+        "Creates a new table with the specified columns."
+    } else if upper.starts_with("CREATE INDEX") || upper.starts_with("CREATE UNIQUE INDEX") {
+        "Creates an index to speed up queries. May lock the table briefly."
+    } else if upper.starts_with("CREATE VIEW") || upper.starts_with("CREATE OR REPLACE VIEW") {
+        "Creates or updates a view definition."
+    } else if upper.starts_with("CREATE TYPE") {
+        "Creates a new enum type."
+    } else if upper.starts_with("CREATE SEQUENCE") {
+        "Creates a new sequence for auto-incrementing values."
+    } else if upper.contains("ADD COLUMN") {
+        "Adds a new column to an existing table."
+    } else if upper.contains("ADD CONSTRAINT") {
+        "Adds a constraint. May fail if existing data violates the constraint."
+    } else if upper.contains("ALTER COLUMN") && upper.contains("TYPE") {
+        "Changes the column data type. May require a full table rewrite."
+    } else if upper.contains("SET NOT NULL") {
+        "Adds a NOT NULL constraint. Scans all rows to verify no NULLs exist."
+    } else if upper.contains("DROP NOT NULL") {
+        "Removes the NOT NULL constraint. Column will accept NULL values."
+    } else if upper.contains("SET DEFAULT") {
+        "Changes the default value for new rows. Does not affect existing rows."
+    } else if upper.contains("DROP DEFAULT") {
+        "Removes the default value. New rows must explicitly provide a value."
+    } else if upper.contains("ALTER TYPE") && upper.contains("ADD VALUE") {
+        "Adds a new value to an existing enum type."
+    } else if upper.contains("ALTER SEQUENCE") {
+        "Modifies sequence properties."
+    } else if upper.contains("MODIFY COLUMN") {
+        "Modifies column definition. May require a table rewrite."
+    } else if upper.starts_with("--") {
+        "Manual migration required. See warning for details."
+    } else {
+        "Schema modification statement."
+    }
+}
+
 /// Print generated migration statements with warnings.
 pub fn print_migration(statements: &[MigrationStatement]) {
     if statements.is_empty() {
@@ -196,6 +250,42 @@ pub fn print_migration(statements: &[MigrationStatement]) {
         for warning in &stmt.warnings {
             println!("{}", format!("  !!  {warning}").yellow().dimmed());
         }
+    }
+}
+
+/// Print migration statements with explanations.
+pub fn print_migration_explained(statements: &[MigrationStatement]) {
+    if statements.is_empty() {
+        println!(
+            "{}",
+            "No migration needed -- schemas are identical.".dimmed()
+        );
+        return;
+    }
+
+    println!(
+        "{}",
+        "Generated migration (with explanations)".bold().underline()
+    );
+    println!();
+
+    for stmt in statements {
+        let sql_upper = stmt.sql.to_uppercase();
+        if sql_upper.starts_with("DROP") {
+            println!("{}", format!("  {}", stmt.sql).red());
+        } else if sql_upper.starts_with("CREATE") || sql_upper.contains("ADD COLUMN") {
+            println!("{}", format!("  {}", stmt.sql).green());
+        } else {
+            println!("{}", format!("  {}", stmt.sql).yellow());
+        }
+
+        let explanation = explain_statement(&stmt.sql);
+        println!("{}", format!("  -> {explanation}").cyan().dimmed());
+
+        for warning in &stmt.warnings {
+            println!("{}", format!("  !!  {warning}").yellow().dimmed());
+        }
+        println!();
     }
 }
 

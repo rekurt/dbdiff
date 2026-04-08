@@ -66,6 +66,26 @@ pub struct Cli {
     /// Migration direction: up (forward), down (rollback), or both
     #[arg(long, value_enum, default_value = "up")]
     pub direction: MigrationDirection,
+
+    /// Color output mode
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorMode,
+
+    /// Show explanation for each migration statement
+    #[arg(long)]
+    pub explain: bool,
+}
+
+/// Color output mode.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
+pub enum ColorMode {
+    /// Auto-detect based on terminal
+    #[default]
+    Auto,
+    /// Always use colors
+    Always,
+    /// Never use colors
+    Never,
 }
 
 /// SSL mode for database connections.
@@ -166,6 +186,14 @@ pub struct DiffArgs {
     /// Migration direction: up (forward), down (rollback), or both
     #[arg(long, value_enum, default_value = "up")]
     pub direction: MigrationDirection,
+
+    /// Color output mode
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorMode,
+
+    /// Show explanation for each migration statement
+    #[arg(long)]
+    pub explain: bool,
 }
 
 /// Migration direction for output.
@@ -239,6 +267,8 @@ pub struct DiffParams {
     pub timeout: u64,
     pub ssl_mode: SslMode,
     pub direction: MigrationDirection,
+    pub color: ColorMode,
+    pub explain: bool,
 }
 
 impl Cli {
@@ -278,6 +308,8 @@ impl Cli {
                     timeout: self.timeout,
                     ssl_mode: self.ssl_mode,
                     direction: self.direction,
+                    color: self.color,
+                    explain: self.explain,
                 })
             }
         }
@@ -316,6 +348,8 @@ impl DiffArgs {
             timeout: self.timeout,
             ssl_mode: self.ssl_mode,
             direction: self.direction,
+            color: self.color,
+            explain: self.explain,
         }
     }
 }

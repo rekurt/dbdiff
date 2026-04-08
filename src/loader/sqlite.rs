@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::error::DbDiffError;
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{Column, Constraint, ConstraintKind, Index, Schema, Table, View};
 
 /// Load a schema from a SQLite database file.
 ///
@@ -27,9 +27,13 @@ pub fn load(source: &str) -> Result<Schema, DbDiffError> {
 
         load_columns(&conn, table_name, &mut table)?;
         load_indexes(&conn, table_name, &mut table)?;
+        load_foreign_keys(&conn, table_name, &mut table)?;
 
         schema.tables.insert(table_name.clone(), table);
     }
+
+    // Load views
+    load_views(&conn, &mut schema)?;
 
     Ok(schema)
 }
@@ -129,6 +133,105 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
         };
 
         table.indexes.insert(index_name, index);
+    }
+
+    Ok(())
+}
+
+fn load_foreign_keys(
+    conn: &Connection,
+    table_name: &str,
+    table: &mut Table,
+) -> Result<(), DbDiffError> {
+    let mut stmt = conn.prepare(&format!(
+        "PRAGMA foreign_key_list({})",
+        quote_identifier(table_name)
+    ))?;
+
+    // PRAGMA foreign_key_list returns: id, seq, table, from, to, on_update, on_delete, match
+    let fks: Vec<(i32, String, String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, String>(2)?, // ref_table
+                row.get::<_, String>(3)?, // from column
+                row.get::<_, String>(4)?, // to column
+                row.get::<_, String>(5)?, // on_update
+                row.get::<_, String>(6)?, // on_delete
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Group by FK id: (ref_table, columns, ref_columns, on_update, on_delete)
+    type FkGroup = (String, Vec<String>, Vec<String>, String, String);
+    let mut fk_groups: std::collections::BTreeMap<i32, FkGroup> = std::collections::BTreeMap::new();
+
+    for (id, ref_table, from_col, to_col, on_update, on_delete) in &fks {
+        let entry = fk_groups.entry(*id).or_insert_with(|| {
+            (
+                ref_table.clone(),
+                Vec::new(),
+                Vec::new(),
+                on_update.clone(),
+                on_delete.clone(),
+            )
+        });
+        entry.1.push(from_col.clone());
+        entry.2.push(to_col.clone());
+    }
+
+    for (id, (ref_table, columns, ref_columns, on_update, on_delete)) in fk_groups {
+        let name = format!("fk_{}_{}", table_name, id);
+        table.constraints.insert(
+            name.clone(),
+            Constraint {
+                name: name.clone(),
+                table_name: table_name.to_string(),
+                kind: ConstraintKind::ForeignKey {
+                    columns,
+                    ref_table,
+                    ref_columns,
+                    on_delete: if on_delete != "NO ACTION" {
+                        Some(on_delete)
+                    } else {
+                        None
+                    },
+                    on_update: if on_update != "NO ACTION" {
+                        Some(on_update)
+                    } else {
+                        None
+                    },
+                },
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn load_views(conn: &Connection, schema: &mut Schema) -> Result<(), DbDiffError> {
+    let mut stmt =
+        conn.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'view' ORDER BY name")?;
+
+    let views: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (name, sql) in views {
+        // Extract definition from "CREATE VIEW name AS ..."
+        let definition = sql
+            .find(" AS ")
+            .map(|pos| sql[pos + 4..].to_string())
+            .unwrap_or(sql);
+        schema.views.insert(
+            name.clone(),
+            View {
+                name,
+                definition: definition.trim().to_string(),
+            },
+        );
     }
 
     Ok(())

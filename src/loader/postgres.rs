@@ -3,7 +3,9 @@ use std::sync::OnceLock;
 use tokio_postgres::Client;
 
 use crate::error::{sanitize_dsn, DbDiffError};
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{
+    Column, Constraint, ConstraintKind, EnumType, Index, Schema, Sequence, Table, View,
+};
 
 /// SSL mode for PostgreSQL connections.
 #[derive(Debug, Clone, Copy, Default)]
@@ -151,6 +153,229 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         if let Some(table) = schema.tables.get_mut(&table_name) {
             table.indexes.insert(index_name, index);
         }
+    }
+
+    // Load foreign key constraints
+    let rows = client
+        .query(
+            "SELECT tc.constraint_name, tc.table_name, \
+                    kcu.column_name, \
+                    ccu.table_name AS ref_table, \
+                    ccu.column_name AS ref_column, \
+                    rc.delete_rule, rc.update_rule \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+               AND tc.table_schema = kcu.table_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_name = tc.constraint_name \
+               AND ccu.table_schema = tc.table_schema \
+             LEFT JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_name = tc.constraint_name \
+               AND rc.constraint_schema = tc.table_schema \
+             WHERE tc.table_schema = 'public' \
+               AND tc.constraint_type IN ('FOREIGN KEY', 'UNIQUE', 'CHECK') \
+             ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position",
+            &[],
+        )
+        .await?;
+
+    // Group FK columns by constraint name
+    // (table, columns, ref_table, ref_columns, on_delete, on_update)
+    type FkEntry = (
+        String,
+        Vec<String>,
+        String,
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let mut fk_map: std::collections::BTreeMap<String, FkEntry> = std::collections::BTreeMap::new();
+    let mut unique_map: std::collections::BTreeMap<String, (String, Vec<String>)> =
+        std::collections::BTreeMap::new();
+
+    for row in &rows {
+        let constraint_name: String = row.get("constraint_name");
+        let table_name: String = row.get("table_name");
+        let column_name: String = row.get("column_name");
+        let ref_table: String = row.get("ref_table");
+        let ref_column: String = row.get("ref_column");
+        let delete_rule: Option<String> = row.get("delete_rule");
+        let update_rule: Option<String> = row.get("update_rule");
+
+        if delete_rule.is_some() {
+            // FK constraint
+            let entry = fk_map.entry(constraint_name).or_insert_with(|| {
+                (
+                    table_name,
+                    Vec::new(),
+                    ref_table,
+                    Vec::new(),
+                    delete_rule.filter(|r| r != "NO ACTION"),
+                    update_rule.filter(|r| r != "NO ACTION"),
+                )
+            });
+            if !entry.1.contains(&column_name) {
+                entry.1.push(column_name);
+            }
+            if !entry.3.contains(&ref_column) {
+                entry.3.push(ref_column);
+            }
+        } else {
+            // UNIQUE constraint
+            let entry = unique_map
+                .entry(constraint_name)
+                .or_insert_with(|| (table_name, Vec::new()));
+            if !entry.1.contains(&column_name) {
+                entry.1.push(column_name);
+            }
+        }
+    }
+
+    for (name, (table_name, columns, ref_table, ref_columns, on_delete, on_update)) in fk_map {
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            table.constraints.insert(
+                name.clone(),
+                Constraint {
+                    name: name.clone(),
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::ForeignKey {
+                        columns,
+                        ref_table,
+                        ref_columns,
+                        on_delete,
+                        on_update,
+                    },
+                },
+            );
+        }
+    }
+
+    for (name, (table_name, columns)) in unique_map {
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            table.constraints.insert(
+                name.clone(),
+                Constraint {
+                    name: name.clone(),
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::Unique { columns },
+                },
+            );
+        }
+    }
+
+    // Load check constraints
+    let rows = client
+        .query(
+            "SELECT con.conname AS constraint_name, \
+                    rel.relname AS table_name, \
+                    pg_get_constraintdef(con.oid) AS definition \
+             FROM pg_constraint con \
+             JOIN pg_class rel ON con.conrelid = rel.oid \
+             JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \
+             WHERE nsp.nspname = 'public' AND con.contype = 'c' \
+             ORDER BY rel.relname, con.conname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let constraint_name: String = row.get("constraint_name");
+        let table_name: String = row.get("table_name");
+        let definition: String = row.get("definition");
+
+        // pg_get_constraintdef returns "CHECK ((expr))" — strip outer CHECK(...)
+        let expression = definition
+            .strip_prefix("CHECK (")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(&definition)
+            .to_string();
+
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            table.constraints.insert(
+                constraint_name.clone(),
+                Constraint {
+                    name: constraint_name,
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::Check { expression },
+                },
+            );
+        }
+    }
+
+    // Load views
+    let rows = client
+        .query(
+            "SELECT viewname, definition \
+             FROM pg_views \
+             WHERE schemaname = 'public' \
+             ORDER BY viewname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("viewname");
+        let definition: String = row.get("definition");
+        schema.views.insert(
+            name.clone(),
+            View {
+                name,
+                definition: definition.trim().to_string(),
+            },
+        );
+    }
+
+    // Load enum types
+    let rows = client
+        .query(
+            "SELECT t.typname AS enum_name, \
+                    array_agg(e.enumlabel ORDER BY e.enumsortorder) AS enum_values \
+             FROM pg_type t \
+             JOIN pg_enum e ON t.oid = e.enumtypid \
+             JOIN pg_namespace n ON t.typnamespace = n.oid \
+             WHERE n.nspname = 'public' \
+             GROUP BY t.typname \
+             ORDER BY t.typname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("enum_name");
+        let values: Vec<String> = row.get("enum_values");
+        schema.enums.insert(name.clone(), EnumType { name, values });
+    }
+
+    // Load sequences
+    let rows = client
+        .query(
+            "SELECT sequencename, data_type, start_value, increment_by, min_value, max_value \
+             FROM pg_sequences \
+             WHERE schemaname = 'public' \
+             ORDER BY sequencename",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("sequencename");
+        let data_type: String = row.get("data_type");
+        let start_value: i64 = row.get("start_value");
+        let increment: i64 = row.get("increment_by");
+        let min_value: i64 = row.get("min_value");
+        let max_value: i64 = row.get("max_value");
+        schema.sequences.insert(
+            name.clone(),
+            Sequence {
+                name,
+                data_type,
+                start_value,
+                increment,
+                min_value,
+                max_value,
+            },
+        );
     }
 
     Ok(schema)
