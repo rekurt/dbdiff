@@ -1,37 +1,89 @@
 use std::sync::OnceLock;
 
-use tokio_postgres::NoTls;
+use tokio_postgres::Client;
 
 use crate::error::{sanitize_dsn, DbDiffError};
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{
+    Column, Constraint, ConstraintKind, EnumType, Index, Schema, Sequence, Table, View,
+};
+
+/// SSL mode for PostgreSQL connections.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PgSslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+}
 
 /// Load a schema from a live PostgreSQL database via DSN.
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
+    load_with_ssl(dsn, PgSslMode::Prefer).await
+}
+
+/// Load a schema from a live PostgreSQL database via DSN with specified SSL mode.
+pub async fn load_with_ssl(dsn: &str, ssl_mode: PgSslMode) -> Result<Schema, DbDiffError> {
+    let client = connect(dsn, ssl_mode).await?;
+    load_from_client(&client).await
+}
+
+async fn connect(dsn: &str, ssl_mode: PgSslMode) -> Result<Client, DbDiffError> {
     let host = sanitize_dsn(dsn);
 
-    let (client, connection) =
-        tokio_postgres::connect(dsn, NoTls)
-            .await
-            .map_err(|e| DbDiffError::PostgresConnect {
-                host: host.clone(),
-                source: e,
-            })?;
+    match ssl_mode {
+        PgSslMode::Disable => connect_no_tls(dsn, &host).await,
+        PgSslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            match connect_tls(dsn, &host, true).await {
+                Ok(client) => Ok(client),
+                Err(_) => connect_no_tls(dsn, &host).await,
+            }
+        }
+        PgSslMode::Require => connect_tls(dsn, &host, false).await,
+    }
+}
 
-    // Spawn the connection handler
+async fn connect_no_tls(dsn: &str, host: &str) -> Result<Client, DbDiffError> {
+    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+        .await
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+
+    let h = host.to_string();
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            use std::error::Error;
-            let mut msg = e.to_string();
-            let mut source = e.source();
-            while let Some(cause) = source {
-                msg.push_str(": ");
-                msg.push_str(&cause.to_string());
-                source = cause.source();
-            }
-            eprintln!("PostgreSQL connection error ({}): {msg}", host);
+            eprintln!("PostgreSQL connection error ({h}): {e}");
         }
     });
 
+    Ok(client)
+}
+
+async fn connect_tls(
+    dsn: &str,
+    host: &str,
+    accept_invalid_certs: bool,
+) -> Result<Client, DbDiffError> {
+    let tls_connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(accept_invalid_certs)
+        .build()
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+    let connector = postgres_native_tls::MakeTlsConnector::new(tls_connector);
+
+    let (client, connection) = tokio_postgres::connect(dsn, connector)
+        .await
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+
+    let h = host.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("PostgreSQL connection error ({h}): {e}");
+        }
+    });
+
+    Ok(client)
+}
+
+async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
     let mut schema = Schema::new();
 
     // Load columns from information_schema
@@ -71,13 +123,20 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
             .insert(column_name, column);
     }
 
-    // Load indexes from pg_indexes
+    // Load indexes from pg_indexes, excluding constraint-backing indexes
+    // (PK and UNIQUE constraint indexes are managed by their constraints)
     let rows = client
         .query(
-            "SELECT indexname, tablename, indexdef \
-             FROM pg_indexes \
-             WHERE schemaname = 'public' \
-             ORDER BY tablename, indexname",
+            "SELECT i.indexname, i.tablename, i.indexdef \
+             FROM pg_indexes i \
+             WHERE i.schemaname = 'public' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM pg_constraint c \
+                   JOIN pg_class cl ON cl.oid = c.conindid \
+                   JOIN pg_namespace cnsp ON cl.relnamespace = cnsp.oid \
+                   WHERE cl.relname = i.indexname AND cnsp.nspname = 'public' \
+               ) \
+             ORDER BY i.tablename, i.indexname",
             &[],
         )
         .await?;
@@ -87,7 +146,7 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         let table_name: String = row.get("tablename");
         let index_def: String = row.get("indexdef");
 
-        // Skip primary key indexes (auto-generated)
+        // Skip primary key indexes (belt-and-suspenders with the NOT EXISTS above)
         if index_name.ends_with("_pkey") {
             continue;
         }
@@ -105,6 +164,204 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         if let Some(table) = schema.tables.get_mut(&table_name) {
             table.indexes.insert(index_name, index);
         }
+    }
+
+    // Load FK and UNIQUE constraints using pg_constraint for correct composite FK mapping.
+    // pg_constraint.conkey/confkey arrays preserve positional column correspondence.
+    let rows = client
+        .query(
+            "SELECT con.conname AS constraint_name, \
+                    rel.relname AS table_name, \
+                    con.contype::text, \
+                    ( \
+                        SELECT array_agg(att.attname ORDER BY u.ord) \
+                        FROM unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) \
+                        JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = u.attnum \
+                    ) AS columns, \
+                    frel.relname AS ref_table, \
+                    ( \
+                        SELECT array_agg(att.attname ORDER BY u.ord) \
+                        FROM unnest(con.confkey) WITH ORDINALITY AS u(attnum, ord) \
+                        JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = u.attnum \
+                    ) AS ref_columns, \
+                    con.confdeltype::text, con.confupdtype::text \
+             FROM pg_constraint con \
+             JOIN pg_class rel ON con.conrelid = rel.oid \
+             JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \
+             LEFT JOIN pg_class frel ON con.confrelid = frel.oid \
+             WHERE nsp.nspname = 'public' AND con.contype IN ('f', 'u') \
+             ORDER BY rel.relname, con.conname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let constraint_name: String = row.get("constraint_name");
+        let table_name: String = row.get("table_name");
+        let contype: String = row.get("contype");
+        let columns: Vec<String> = row.get("columns");
+
+        if contype == "f" {
+            let ref_table: String = row.get("ref_table");
+            let ref_columns: Vec<String> = row.get("ref_columns");
+            let del_type: String = row.get("confdeltype");
+            let upd_type: String = row.get("confupdtype");
+
+            let on_delete = match del_type.as_str() {
+                "c" => Some("CASCADE".to_string()),
+                "n" => Some("SET NULL".to_string()),
+                "d" => Some("SET DEFAULT".to_string()),
+                _ => None, // 'a' = NO ACTION, 'r' = RESTRICT
+            };
+            let on_update = match upd_type.as_str() {
+                "c" => Some("CASCADE".to_string()),
+                "n" => Some("SET NULL".to_string()),
+                "d" => Some("SET DEFAULT".to_string()),
+                _ => None,
+            };
+
+            if let Some(table) = schema.tables.get_mut(&table_name) {
+                table.constraints.insert(
+                    constraint_name.clone(),
+                    Constraint {
+                        name: constraint_name,
+                        table_name: table_name.clone(),
+                        kind: ConstraintKind::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                            on_delete,
+                            on_update,
+                        },
+                    },
+                );
+            }
+        } else if contype == "u" {
+            if let Some(table) = schema.tables.get_mut(&table_name) {
+                table.constraints.insert(
+                    constraint_name.clone(),
+                    Constraint {
+                        name: constraint_name,
+                        table_name: table_name.clone(),
+                        kind: ConstraintKind::Unique { columns },
+                    },
+                );
+            }
+        }
+    }
+
+    // Load check constraints
+    let rows = client
+        .query(
+            "SELECT con.conname AS constraint_name, \
+                    rel.relname AS table_name, \
+                    pg_get_constraintdef(con.oid) AS definition \
+             FROM pg_constraint con \
+             JOIN pg_class rel ON con.conrelid = rel.oid \
+             JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \
+             WHERE nsp.nspname = 'public' AND con.contype = 'c' \
+             ORDER BY rel.relname, con.conname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let constraint_name: String = row.get("constraint_name");
+        let table_name: String = row.get("table_name");
+        let definition: String = row.get("definition");
+
+        // pg_get_constraintdef returns "CHECK ((expr))" — strip outer CHECK(...)
+        let expression = definition
+            .strip_prefix("CHECK (")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(&definition)
+            .to_string();
+
+        if let Some(table) = schema.tables.get_mut(&table_name) {
+            table.constraints.insert(
+                constraint_name.clone(),
+                Constraint {
+                    name: constraint_name,
+                    table_name: table_name.clone(),
+                    kind: ConstraintKind::Check { expression },
+                },
+            );
+        }
+    }
+
+    // Load views
+    let rows = client
+        .query(
+            "SELECT viewname, definition \
+             FROM pg_views \
+             WHERE schemaname = 'public' \
+             ORDER BY viewname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("viewname");
+        let definition: String = row.get("definition");
+        schema.views.insert(
+            name.clone(),
+            View {
+                name,
+                definition: definition.trim().to_string(),
+            },
+        );
+    }
+
+    // Load enum types
+    let rows = client
+        .query(
+            "SELECT t.typname AS enum_name, \
+                    array_agg(e.enumlabel ORDER BY e.enumsortorder) AS enum_values \
+             FROM pg_type t \
+             JOIN pg_enum e ON t.oid = e.enumtypid \
+             JOIN pg_namespace n ON t.typnamespace = n.oid \
+             WHERE n.nspname = 'public' \
+             GROUP BY t.typname \
+             ORDER BY t.typname",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("enum_name");
+        let values: Vec<String> = row.get("enum_values");
+        schema.enums.insert(name.clone(), EnumType { name, values });
+    }
+
+    // Load sequences
+    let rows = client
+        .query(
+            "SELECT sequencename, data_type, start_value, increment_by, min_value, max_value \
+             FROM pg_sequences \
+             WHERE schemaname = 'public' \
+             ORDER BY sequencename",
+            &[],
+        )
+        .await?;
+
+    for row in &rows {
+        let name: String = row.get("sequencename");
+        let data_type: String = row.get("data_type");
+        let start_value: i64 = row.get("start_value");
+        let increment: i64 = row.get("increment_by");
+        let min_value: i64 = row.get("min_value");
+        let max_value: i64 = row.get("max_value");
+        schema.sequences.insert(
+            name.clone(),
+            Sequence {
+                name,
+                data_type,
+                start_value,
+                increment,
+                min_value,
+                max_value,
+            },
+        );
     }
 
     Ok(schema)
@@ -329,8 +586,6 @@ mod tests {
 
     #[test]
     fn test_parse_index_with_non_ascii_identifiers() {
-        // 'ı' (U+0131, 2 bytes UTF-8) uppercases to 'I' (1 byte), shifting byte offsets.
-        // This verifies we don't use uppercased offsets to slice the original string.
         assert_eq!(
             parse_index_columns(
                 "CREATE INDEX \"ındex_türkçe\" ON \"schéma\".\"tablo\" USING btree (\"sütun\")"
@@ -341,7 +596,6 @@ mod tests {
 
     #[test]
     fn test_parse_index_table_name_with_parens() {
-        // Table name containing '(' should not confuse the column-list finder.
         assert_eq!(
             parse_index_columns("CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"),
             vec!["col1", "col2"]
@@ -350,7 +604,6 @@ mod tests {
 
     #[test]
     fn test_parse_index_quoted_parens_in_columns() {
-        // Parentheses inside double-quoted identifiers should be ignored during depth scan.
         assert_eq!(
             parse_index_columns("CREATE INDEX idx ON t USING btree (\"a)\", b)"),
             vec!["\"a)\"", "b"]

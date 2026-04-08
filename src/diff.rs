@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{Column, Constraint, EnumType, Index, Schema, Sequence, Table, View};
 
 /// The result of comparing two schemas.
 #[derive(Debug, Clone, Serialize)]
@@ -9,6 +9,15 @@ pub struct SchemaDiff {
     pub removed_tables: Vec<Table>,
     pub modified_tables: Vec<TableDiff>,
     pub unchanged_tables: Vec<String>,
+    pub added_views: Vec<View>,
+    pub removed_views: Vec<View>,
+    pub modified_views: Vec<ViewDiff>,
+    pub added_enums: Vec<EnumType>,
+    pub removed_enums: Vec<EnumType>,
+    pub modified_enums: Vec<EnumDiff>,
+    pub added_sequences: Vec<Sequence>,
+    pub removed_sequences: Vec<Sequence>,
+    pub modified_sequences: Vec<SequenceDiff>,
 }
 
 impl SchemaDiff {
@@ -17,6 +26,15 @@ impl SchemaDiff {
         self.added_tables.is_empty()
             && self.removed_tables.is_empty()
             && self.modified_tables.is_empty()
+            && self.added_views.is_empty()
+            && self.removed_views.is_empty()
+            && self.modified_views.is_empty()
+            && self.added_enums.is_empty()
+            && self.removed_enums.is_empty()
+            && self.modified_enums.is_empty()
+            && self.added_sequences.is_empty()
+            && self.removed_sequences.is_empty()
+            && self.modified_sequences.is_empty()
     }
 }
 
@@ -30,6 +48,8 @@ pub struct TableDiff {
     pub unchanged_columns: Vec<String>,
     pub added_indexes: Vec<Index>,
     pub removed_indexes: Vec<Index>,
+    pub added_constraints: Vec<Constraint>,
+    pub removed_constraints: Vec<Constraint>,
 }
 
 impl TableDiff {
@@ -39,6 +59,8 @@ impl TableDiff {
             && self.modified_columns.is_empty()
             && self.added_indexes.is_empty()
             && self.removed_indexes.is_empty()
+            && self.added_constraints.is_empty()
+            && self.removed_constraints.is_empty()
     }
 }
 
@@ -47,6 +69,32 @@ impl TableDiff {
 pub struct ColumnDiff {
     pub old: Column,
     pub new: Column,
+}
+
+/// A view that changed its definition.
+#[derive(Debug, Clone, Serialize)]
+pub struct ViewDiff {
+    pub name: String,
+    pub old_definition: String,
+    pub new_definition: String,
+}
+
+/// An enum type that changed its values.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnumDiff {
+    pub name: String,
+    pub added_values: Vec<String>,
+    pub removed_values: Vec<String>,
+    /// True when the values are the same set but in a different order.
+    pub reordered: bool,
+}
+
+/// A sequence that changed its properties.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequenceDiff {
+    pub name: String,
+    pub old: Sequence,
+    pub new: Sequence,
 }
 
 /// Compare two schemas and produce a diff.
@@ -60,21 +108,21 @@ pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
     let mut modified_tables = Vec::new();
     let mut unchanged_tables = Vec::new();
 
-    // Tables only in right → added
+    // Tables only in right -> added
     for (name, table) in &right.tables {
         if !left.tables.contains_key(name) {
             added_tables.push(table.clone());
         }
     }
 
-    // Tables only in left → removed
+    // Tables only in left -> removed
     for (name, table) in &left.tables {
         if !right.tables.contains_key(name) {
             removed_tables.push(table.clone());
         }
     }
 
-    // Tables in both → compare
+    // Tables in both -> compare
     for (name, left_table) in &left.tables {
         if let Some(right_table) = right.tables.get(name) {
             let table_diff = diff_tables(name, left_table, right_table);
@@ -86,11 +134,30 @@ pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
         }
     }
 
+    // Views
+    let (added_views, removed_views, modified_views) = diff_views(&left.views, &right.views);
+
+    // Enums
+    let (added_enums, removed_enums, modified_enums) = diff_enums(&left.enums, &right.enums);
+
+    // Sequences
+    let (added_sequences, removed_sequences, modified_sequences) =
+        diff_sequences(&left.sequences, &right.sequences);
+
     SchemaDiff {
         added_tables,
         removed_tables,
         modified_tables,
         unchanged_tables,
+        added_views,
+        removed_views,
+        modified_views,
+        added_enums,
+        removed_enums,
+        modified_enums,
+        added_sequences,
+        removed_sequences,
+        modified_sequences,
     }
 }
 
@@ -100,21 +167,18 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
     let mut modified_columns = Vec::new();
     let mut unchanged_columns = Vec::new();
 
-    // Columns only in right → added
     for (col_name, col) in &right.columns {
         if !left.columns.contains_key(col_name) {
             added_columns.push(col.clone());
         }
     }
 
-    // Columns only in left → removed
     for (col_name, col) in &left.columns {
         if !right.columns.contains_key(col_name) {
             removed_columns.push(col.clone());
         }
     }
 
-    // Columns in both → compare
     for (col_name, left_col) in &left.columns {
         if let Some(right_col) = right.columns.get(col_name) {
             if left_col != right_col {
@@ -136,7 +200,6 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         if !left.indexes.contains_key(idx_name) {
             added_indexes.push(idx.clone());
         } else if left.indexes.get(idx_name) != Some(idx) {
-            // Changed index: drop old + create new
             removed_indexes.push(left.indexes[idx_name].clone());
             added_indexes.push(idx.clone());
         }
@@ -148,6 +211,25 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         }
     }
 
+    // Constraints
+    let mut added_constraints = Vec::new();
+    let mut removed_constraints = Vec::new();
+
+    for (c_name, c) in &right.constraints {
+        if !left.constraints.contains_key(c_name) {
+            added_constraints.push(c.clone());
+        } else if left.constraints.get(c_name) != Some(c) {
+            removed_constraints.push(left.constraints[c_name].clone());
+            added_constraints.push(c.clone());
+        }
+    }
+
+    for (c_name, c) in &left.constraints {
+        if !right.constraints.contains_key(c_name) {
+            removed_constraints.push(c.clone());
+        }
+    }
+
     TableDiff {
         table_name: name.to_string(),
         added_columns,
@@ -156,13 +238,144 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         unchanged_columns,
         added_indexes,
         removed_indexes,
+        added_constraints,
+        removed_constraints,
     }
+}
+
+fn diff_views(
+    left: &std::collections::BTreeMap<String, View>,
+    right: &std::collections::BTreeMap<String, View>,
+) -> (Vec<View>, Vec<View>, Vec<ViewDiff>) {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+
+    for (name, view) in right {
+        if !left.contains_key(name) {
+            added.push(view.clone());
+        }
+    }
+
+    for (name, view) in left {
+        if !right.contains_key(name) {
+            removed.push(view.clone());
+        }
+    }
+
+    for (name, left_view) in left {
+        if let Some(right_view) = right.get(name) {
+            let left_norm = normalize_whitespace(&left_view.definition);
+            let right_norm = normalize_whitespace(&right_view.definition);
+            if left_norm != right_norm {
+                modified.push(ViewDiff {
+                    name: name.clone(),
+                    old_definition: left_view.definition.clone(),
+                    new_definition: right_view.definition.clone(),
+                });
+            }
+        }
+    }
+
+    (added, removed, modified)
+}
+
+fn diff_enums(
+    left: &std::collections::BTreeMap<String, EnumType>,
+    right: &std::collections::BTreeMap<String, EnumType>,
+) -> (Vec<EnumType>, Vec<EnumType>, Vec<EnumDiff>) {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+
+    for (name, e) in right {
+        if !left.contains_key(name) {
+            added.push(e.clone());
+        }
+    }
+
+    for (name, e) in left {
+        if !right.contains_key(name) {
+            removed.push(e.clone());
+        }
+    }
+
+    for (name, left_enum) in left {
+        if let Some(right_enum) = right.get(name) {
+            if left_enum.values != right_enum.values {
+                let added_values: Vec<String> = right_enum
+                    .values
+                    .iter()
+                    .filter(|v| !left_enum.values.contains(v))
+                    .cloned()
+                    .collect();
+                let removed_values: Vec<String> = left_enum
+                    .values
+                    .iter()
+                    .filter(|v| !right_enum.values.contains(v))
+                    .cloned()
+                    .collect();
+                // Only emit a diff if there are actual value additions or removals.
+                // Order-only changes (same set, different order) are tracked as
+                // reordered_values so migration can emit a warning.
+                let is_order_only = added_values.is_empty() && removed_values.is_empty();
+                modified.push(EnumDiff {
+                    name: name.clone(),
+                    added_values,
+                    removed_values,
+                    reordered: is_order_only,
+                });
+            }
+        }
+    }
+
+    (added, removed, modified)
+}
+
+fn diff_sequences(
+    left: &std::collections::BTreeMap<String, Sequence>,
+    right: &std::collections::BTreeMap<String, Sequence>,
+) -> (Vec<Sequence>, Vec<Sequence>, Vec<SequenceDiff>) {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut modified = Vec::new();
+
+    for (name, s) in right {
+        if !left.contains_key(name) {
+            added.push(s.clone());
+        }
+    }
+
+    for (name, s) in left {
+        if !right.contains_key(name) {
+            removed.push(s.clone());
+        }
+    }
+
+    for (name, left_seq) in left {
+        if let Some(right_seq) = right.get(name) {
+            if left_seq != right_seq {
+                modified.push(SequenceDiff {
+                    name: name.clone(),
+                    old: left_seq.clone(),
+                    new: right_seq.clone(),
+                });
+            }
+        }
+    }
+
+    (added, removed, modified)
+}
+
+/// Normalize whitespace for view definition comparison.
+fn normalize_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Column, Index, Schema, Table};
+    use crate::model::{Column, Constraint, ConstraintKind, Index, Schema, Table};
 
     fn make_column(name: &str, data_type: &str, nullable: bool, default: Option<&str>) -> Column {
         Column {
@@ -354,8 +567,6 @@ mod tests {
 
     #[test]
     fn complex_diff_scenario() {
-        // Left: users(id, email, payment_date), orders(id)
-        // Right: users(id, email, deleted_at), orders(id, paid_at) + index
         let mut left = Schema::new();
         {
             let mut users = Table::new("users");
@@ -414,7 +625,6 @@ mod tests {
         assert!(!diff.is_empty());
         assert_eq!(diff.modified_tables.len(), 2);
 
-        // Users: +deleted_at, -payment_date
         let users_diff = diff
             .modified_tables
             .iter()
@@ -425,7 +635,6 @@ mod tests {
         assert_eq!(users_diff.removed_columns.len(), 1);
         assert_eq!(users_diff.removed_columns[0].name, "payment_date");
 
-        // Orders: +paid_at, +idx_orders_paid_at
         let orders_diff = diff
             .modified_tables
             .iter()
@@ -435,5 +644,125 @@ mod tests {
         assert_eq!(orders_diff.added_columns[0].name, "paid_at");
         assert_eq!(orders_diff.added_indexes.len(), 1);
         assert_eq!(orders_diff.added_indexes[0].name, "idx_orders_paid_at");
+    }
+
+    #[test]
+    fn constraint_diff_detected() {
+        let mut left_table = Table::new("orders");
+        left_table
+            .columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        left_table.columns.insert(
+            "user_id".into(),
+            make_column("user_id", "integer", false, None),
+        );
+
+        let mut right_table = left_table.clone();
+        right_table.constraints.insert(
+            "fk_orders_user".into(),
+            Constraint {
+                name: "fk_orders_user".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::ForeignKey {
+                    columns: vec!["user_id".into()],
+                    ref_table: "users".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: Some("CASCADE".into()),
+                    on_update: None,
+                },
+            },
+        );
+
+        let mut left = Schema::new();
+        left.tables.insert("orders".into(), left_table);
+        let mut right = Schema::new();
+        right.tables.insert("orders".into(), right_table);
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_tables.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_constraints.len(), 1);
+        assert_eq!(
+            diff.modified_tables[0].added_constraints[0].name,
+            "fk_orders_user"
+        );
+    }
+
+    #[test]
+    fn view_diff_detected() {
+        let mut left = Schema::new();
+        left.views.insert(
+            "active_users".into(),
+            View {
+                name: "active_users".into(),
+                definition: "SELECT * FROM users WHERE active = true".into(),
+            },
+        );
+
+        let mut right = Schema::new();
+        right.views.insert(
+            "active_users".into(),
+            View {
+                name: "active_users".into(),
+                definition: "SELECT * FROM users WHERE active = true AND deleted_at IS NULL".into(),
+            },
+        );
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_views.len(), 1);
+        assert_eq!(diff.modified_views[0].name, "active_users");
+    }
+
+    #[test]
+    fn enum_diff_detected() {
+        let mut left = Schema::new();
+        left.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["active".into(), "inactive".into()],
+            },
+        );
+
+        let mut right = Schema::new();
+        right.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["active".into(), "inactive".into(), "suspended".into()],
+            },
+        );
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_enums.len(), 1);
+        assert_eq!(diff.modified_enums[0].added_values, vec!["suspended"]);
+        assert!(diff.modified_enums[0].removed_values.is_empty());
+        assert!(!diff.modified_enums[0].reordered);
+    }
+
+    #[test]
+    fn enum_order_change_detected_as_reordered() {
+        let mut left = Schema::new();
+        left.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["active".into(), "inactive".into()],
+            },
+        );
+
+        let mut right = Schema::new();
+        right.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["inactive".into(), "active".into()],
+            },
+        );
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_enums.len(), 1);
+        assert!(diff.modified_enums[0].reordered);
+        assert!(diff.modified_enums[0].added_values.is_empty());
+        assert!(diff.modified_enums[0].removed_values.is_empty());
     }
 }

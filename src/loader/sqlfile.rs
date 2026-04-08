@@ -1,7 +1,7 @@
 use regex::Regex;
 
 use crate::error::DbDiffError;
-use crate::model::{Column, Index, Schema, Table};
+use crate::model::{Column, Constraint, ConstraintKind, Index, Schema, Table};
 
 /// Load a schema by parsing a `.sql` file containing CREATE TABLE and CREATE INDEX statements.
 pub fn load(content: &str) -> Result<Schema, DbDiffError> {
@@ -22,7 +22,7 @@ pub fn load_file(path: &str) -> Result<Schema, DbDiffError> {
 /// Parse all CREATE TABLE statements from SQL content.
 fn parse_create_tables(content: &str, schema: &mut Schema) -> Result<(), DbDiffError> {
     let re = Regex::new(r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(")
-        .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+        .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for cap in re.captures_iter(content) {
         let table_name = cap[1].to_string();
@@ -71,8 +71,8 @@ fn extract_parenthesized_body(content: &str, start: usize) -> Result<String, DbD
     }
 
     if depth != 0 {
-        return Err(DbDiffError::SqlParse(
-            "Unmatched parenthesis in CREATE TABLE statement".to_string(),
+        return Err(DbDiffError::sql_parse(
+            "Unmatched parenthesis in CREATE TABLE statement",
         ));
     }
 
@@ -80,22 +80,30 @@ fn extract_parenthesized_body(content: &str, start: usize) -> Result<String, DbD
     Ok(content[start..pos - 1].to_string())
 }
 
-/// Parse column definitions from the body of a CREATE TABLE.
+/// Parse column definitions and constraints from the body of a CREATE TABLE.
 fn parse_column_definitions(body: &str, table: &mut Table) -> Result<(), DbDiffError> {
     let parts = split_top_level(body, ',');
 
     let constraint_re =
         Regex::new(r"(?i)^\s*(CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|EXCLUDE)")
-            .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+            .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     let col_re = Regex::new(
         r"(?i)^\s*(\w+)\s+([\w]+(?:\s*\([^)]*\))?(?:\s+(?:varying|precision|without|with|time|zone|double)\s*(?:\([^)]*\))?)*)\s*(.*)",
     )
-    .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+    .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for part in &parts {
         let trimmed = part.trim();
-        if trimmed.is_empty() || constraint_re.is_match(trimmed) {
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Try to parse as constraint
+        if constraint_re.is_match(trimmed) {
+            if let Some(c) = parse_constraint(trimmed, &table.name) {
+                table.constraints.insert(c.name.clone(), c);
+            }
             continue;
         }
 
@@ -114,11 +122,158 @@ fn parse_column_definitions(body: &str, table: &mut Table) -> Result<(), DbDiffE
                 is_nullable,
                 default,
             };
-            table.columns.insert(name, column);
+            table.columns.insert(name.clone(), column);
+
+            // Check for inline REFERENCES: col_name TYPE REFERENCES ref_table[(ref_cols)]
+            if let Some(c) = parse_inline_reference(trimmed, &table.name, &name) {
+                table.constraints.insert(c.name.clone(), c);
+            }
         }
     }
 
     Ok(())
+}
+
+/// Parse a constraint definition from a CREATE TABLE body.
+fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
+    // CONSTRAINT name FOREIGN KEY (cols) REFERENCES ref_table[(ref_cols)] [ON DELETE ...] [ON UPDATE ...]
+    // The (ref_cols) part is optional — when omitted, references the primary key
+    let fk_re = Regex::new(
+        r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(\w+)\s*(?:\(([^)]+)\))?(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
+    ).ok()?;
+    if let Some(cap) = fk_re.captures(def) {
+        let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "fk_{}_{}_{}",
+                    table_name,
+                    cap[3].to_lowercase(),
+                    columns.join("_")
+                )
+            });
+        let ref_table = cap[3].to_string();
+        // When ref columns are omitted, the FK targets the referenced table's PK.
+        // Use the source column names as a best-effort match (since the actual PK
+        // column names are not available without loading the referenced table).
+        let ref_columns: Vec<String> = cap
+            .get(4)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            })
+            .unwrap_or_else(|| columns.clone());
+        let on_delete = cap
+            .get(5)
+            .map(|m| m.as_str().to_uppercase())
+            .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+        let on_update = cap
+            .get(6)
+            .map(|m| m.as_str().to_uppercase())
+            .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+
+        return Some(Constraint {
+            name: name.clone(),
+            table_name: table_name.to_string(),
+            kind: ConstraintKind::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+                on_delete,
+                on_update,
+            },
+        });
+    }
+
+    // CONSTRAINT name UNIQUE (cols)
+    let unique_re = Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?UNIQUE\s*\(([^)]+)\)").ok()?;
+    if let Some(cap) = unique_re.captures(def) {
+        let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| format!("unique_{}_{}", table_name, columns.join("_")));
+        return Some(Constraint {
+            name: name.clone(),
+            table_name: table_name.to_string(),
+            kind: ConstraintKind::Unique { columns },
+        });
+    }
+
+    // CONSTRAINT name CHECK (expr)
+    let check_re = Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?CHECK\s*\((.+)\)\s*$").ok()?;
+    if let Some(cap) = check_re.captures(def) {
+        let expression = cap[2].trim().to_string();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| {
+                // Use a hash of the expression to ensure uniqueness for unnamed checks
+                let hash = expression
+                    .bytes()
+                    .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                format!("check_{}_{:x}", table_name, hash)
+            });
+        return Some(Constraint {
+            name: name.clone(),
+            table_name: table_name.to_string(),
+            kind: ConstraintKind::Check { expression },
+        });
+    }
+
+    // PRIMARY KEY — skip (we don't diff PKs)
+    None
+}
+
+/// Parse inline REFERENCES from a column definition.
+/// e.g. "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE"
+fn parse_inline_reference(def: &str, table_name: &str, col_name: &str) -> Option<Constraint> {
+    let re = Regex::new(
+        r"(?i)REFERENCES\s+(\w+)\s*(?:\(([^)]+)\))?(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
+    ).ok()?;
+    let cap = re.captures(def)?;
+
+    let ref_table = cap[1].to_string();
+    let ref_columns: Vec<String> = cap
+        .get(2)
+        .map(|m| {
+            m.as_str()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![col_name.to_string()]);
+    let on_delete = cap
+        .get(3)
+        .map(|m| m.as_str().to_uppercase())
+        .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+    let on_update = cap
+        .get(4)
+        .map(|m| m.as_str().to_uppercase())
+        .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+
+    let name = format!(
+        "fk_{}_{}_{}",
+        table_name,
+        ref_table.to_lowercase(),
+        col_name
+    );
+
+    Some(Constraint {
+        name,
+        table_name: table_name.to_string(),
+        kind: ConstraintKind::ForeignKey {
+            columns: vec![col_name.to_string()],
+            ref_table,
+            ref_columns,
+            on_delete,
+            on_update,
+        },
+    })
 }
 
 /// Split a string by a delimiter, but only at the top level (not inside parentheses).
@@ -260,7 +415,7 @@ fn parse_create_indexes(content: &str, schema: &mut Schema) -> Result<(), DbDiff
     let re = Regex::new(
         r"(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(\w+)\s*\(([^)]+)\)",
     )
-    .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+    .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for cap in re.captures_iter(content) {
         let is_unique = cap.get(1).is_some();

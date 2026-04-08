@@ -15,6 +15,8 @@ pub enum SqlDialect {
     MySql,
     Sqlite,
     SqlFile,
+    /// JSON snapshot — carries all object types (views, enums, sequences)
+    Snapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -23,20 +25,44 @@ pub struct LoadedSchema {
     pub dialect: SqlDialect,
 }
 
+/// SSL mode for database connections.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum SslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+}
+
 /// Load a schema from a source string.
 ///
 /// Dispatches to the appropriate loader based on the source format:
-/// - `postgres://...` or `postgresql://...` → live PostgreSQL connection
-/// - `mysql://...` or `mariadb://...` → live MySQL/MariaDB connection
-/// - `.db`, `.sqlite`, `.sqlite3`, or `sqlite://...` → SQLite database file
-/// - `.sql` file path → SQL file parser
+/// - `postgres://...` or `postgresql://...` -> live PostgreSQL connection
+/// - `mysql://...` or `mariadb://...` -> live MySQL/MariaDB connection
+/// - `.db`, `.sqlite`, `.sqlite3`, or `sqlite://...` -> SQLite database file
+/// - `.sql` file path -> SQL file parser
 pub async fn load_schema(source: &str) -> Result<LoadedSchema, DbDiffError> {
+    load_schema_with_ssl(source, SslMode::Prefer).await
+}
+
+/// Load a schema from a source string with specified SSL mode.
+pub async fn load_schema_with_ssl(
+    source: &str,
+    ssl_mode: SslMode,
+) -> Result<LoadedSchema, DbDiffError> {
     #[cfg(feature = "postgres")]
     if source.starts_with("postgres://") || source.starts_with("postgresql://") {
-        return postgres::load(source).await.map(|schema| LoadedSchema {
-            schema,
-            dialect: SqlDialect::Postgres,
-        });
+        let pg_ssl = match ssl_mode {
+            SslMode::Disable => postgres::PgSslMode::Disable,
+            SslMode::Prefer => postgres::PgSslMode::Prefer,
+            SslMode::Require => postgres::PgSslMode::Require,
+        };
+        return postgres::load_with_ssl(source, pg_ssl)
+            .await
+            .map(|schema| LoadedSchema {
+                schema,
+                dialect: SqlDialect::Postgres,
+            });
     }
 
     #[cfg(feature = "mysql")]
@@ -52,10 +78,21 @@ pub async fn load_schema(source: &str) -> Result<LoadedSchema, DbDiffError> {
         let source = source.to_string();
         let schema = tokio::task::spawn_blocking(move || sqlite::load(&source))
             .await
-            .map_err(|e| DbDiffError::InvalidArg(e.to_string()))?;
+            .map_err(|e| DbDiffError::invalid_arg(e.to_string()))?;
         return Ok(LoadedSchema {
             schema: schema?,
             dialect: SqlDialect::Sqlite,
+        });
+    }
+
+    // JSON snapshot files
+    if source.ends_with(".json") {
+        let content = std::fs::read_to_string(source)?;
+        let snapshot: crate::model::SchemaSnapshot = serde_json::from_str(&content)
+            .map_err(|e| DbDiffError::invalid_arg(format!("Failed to parse JSON snapshot: {e}")))?;
+        return Ok(LoadedSchema {
+            schema: snapshot.into(),
+            dialect: SqlDialect::Snapshot,
         });
     }
 
@@ -66,7 +103,7 @@ pub async fn load_schema(source: &str) -> Result<LoadedSchema, DbDiffError> {
         });
     }
 
-    Err(DbDiffError::InvalidArg(format!(
+    Err(DbDiffError::invalid_arg(format!(
         "Cannot determine source type for '{source}'. \
          Expected a database DSN (postgres://, mysql://, sqlite://) or a .sql file path."
     )))
