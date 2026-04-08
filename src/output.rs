@@ -48,6 +48,55 @@ pub fn print_diff(diff: &SchemaDiff) {
         }
         println!();
     }
+
+    // Views
+    for view in &diff.added_views {
+        println!("{}", format!("+ view: {}", view.name).green());
+    }
+    for view in &diff.removed_views {
+        println!("{}", format!("- view: {}", view.name).red());
+    }
+    for vd in &diff.modified_views {
+        println!(
+            "{}",
+            format!("~ view: {} [definition changed]", vd.name).yellow()
+        );
+    }
+
+    // Enums
+    for e in &diff.added_enums {
+        println!(
+            "{}",
+            format!("+ enum: {} ({})", e.name, e.values.join(", ")).green()
+        );
+    }
+    for e in &diff.removed_enums {
+        println!("{}", format!("- enum: {}", e.name).red());
+    }
+    for ed in &diff.modified_enums {
+        let mut parts = Vec::new();
+        if !ed.added_values.is_empty() {
+            parts.push(format!("+{}", ed.added_values.join(", +")));
+        }
+        if !ed.removed_values.is_empty() {
+            parts.push(format!("-{}", ed.removed_values.join(", -")));
+        }
+        println!(
+            "{}",
+            format!("~ enum: {} [{}]", ed.name, parts.join(", ")).yellow()
+        );
+    }
+
+    // Sequences
+    for s in &diff.added_sequences {
+        println!("{}", format!("+ sequence: {}", s.name).green());
+    }
+    for s in &diff.removed_sequences {
+        println!("{}", format!("- sequence: {}", s.name).red());
+    }
+    for sd in &diff.modified_sequences {
+        println!("{}", format!("~ sequence: {}", sd.name).yellow());
+    }
 }
 
 fn print_table_diff(diff: &TableDiff) {
@@ -79,6 +128,20 @@ fn print_table_diff(diff: &TableDiff) {
 
     for idx in &diff.removed_indexes {
         println!("{}", format!("  - index   {}", idx.definition()).red());
+    }
+
+    for c in &diff.added_constraints {
+        println!(
+            "{}",
+            format!("  + constraint  {:<16} {}", c.name, c.definition()).green()
+        );
+    }
+
+    for c in &diff.removed_constraints {
+        println!(
+            "{}",
+            format!("  - constraint  {:<16} {}", c.name, c.definition()).red()
+        );
     }
 }
 
@@ -163,6 +226,16 @@ pub struct DiffSummary {
     pub columns_modified: usize,
     pub indexes_added: usize,
     pub indexes_removed: usize,
+    pub constraints_added: usize,
+    pub constraints_removed: usize,
+    pub views_added: usize,
+    pub views_removed: usize,
+    pub views_modified: usize,
+    pub enums_added: usize,
+    pub enums_removed: usize,
+    pub enums_modified: usize,
+    pub sequences_added: usize,
+    pub sequences_removed: usize,
 }
 
 /// Compute summary statistics from a diff.
@@ -217,6 +290,28 @@ pub fn diff_summary(diff: &SchemaDiff) -> DiffSummary {
             .map(|t| t.indexes.len())
             .sum::<usize>();
 
+    let constraints_added: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.added_constraints.len())
+        .sum::<usize>()
+        + diff
+            .added_tables
+            .iter()
+            .map(|t| t.constraints.len())
+            .sum::<usize>();
+
+    let constraints_removed: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.removed_constraints.len())
+        .sum::<usize>()
+        + diff
+            .removed_tables
+            .iter()
+            .map(|t| t.constraints.len())
+            .sum::<usize>();
+
     DiffSummary {
         tables_added: diff.added_tables.len(),
         tables_removed: diff.removed_tables.len(),
@@ -227,6 +322,16 @@ pub fn diff_summary(diff: &SchemaDiff) -> DiffSummary {
         columns_modified,
         indexes_added,
         indexes_removed,
+        constraints_added,
+        constraints_removed,
+        views_added: diff.added_views.len(),
+        views_removed: diff.removed_views.len(),
+        views_modified: diff.modified_views.len(),
+        enums_added: diff.added_enums.len(),
+        enums_removed: diff.removed_enums.len(),
+        enums_modified: diff.modified_enums.len(),
+        sequences_added: diff.added_sequences.len(),
+        sequences_removed: diff.removed_sequences.len(),
     }
 }
 
@@ -265,6 +370,31 @@ pub fn print_summary(diff: &SchemaDiff) {
     }
     if s.indexes_removed > 0 {
         detail_parts.push(format!("{} indexes removed", s.indexes_removed));
+    }
+    if s.constraints_added > 0 {
+        detail_parts.push(format!("{} constraints added", s.constraints_added));
+    }
+    if s.constraints_removed > 0 {
+        detail_parts.push(format!("{} constraints removed", s.constraints_removed));
+    }
+
+    if s.views_added > 0 || s.views_removed > 0 || s.views_modified > 0 {
+        parts.push(format!(
+            "{} view(s) changed",
+            s.views_added + s.views_removed + s.views_modified
+        ));
+    }
+    if s.enums_added > 0 || s.enums_removed > 0 || s.enums_modified > 0 {
+        parts.push(format!(
+            "{} enum(s) changed",
+            s.enums_added + s.enums_removed + s.enums_modified
+        ));
+    }
+    if s.sequences_added > 0 || s.sequences_removed > 0 {
+        parts.push(format!(
+            "{} sequence(s) changed",
+            s.sequences_added + s.sequences_removed
+        ));
     }
 
     let mut summary = format!("Summary: {}", parts.join(", "));

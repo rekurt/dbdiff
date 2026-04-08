@@ -12,7 +12,42 @@ use crate::error::DbDiffError;
 pub struct Config {
     pub ignore: IgnoreConfig,
     pub output: OutputConfig,
+    pub protected: ProtectedConfig,
 }
+
+/// Objects that cannot be dropped or altered.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProtectedConfig {
+    /// Table names that cannot be dropped.
+    pub tables: Vec<String>,
+    /// Column patterns that cannot be dropped (same format as ignore.columns).
+    pub columns: Vec<String>,
+}
+
+/// Default config template for `dbdiff init`.
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# dbdiff configuration
+# See https://github.com/rekurt/dbdiff for documentation
+
+ignore:
+  tables: []
+    # - _migrations
+    # - schema_version
+  columns: []
+    # - "*.created_at"
+    # - "*.updated_at"
+
+protected:
+  tables: []
+    # - users
+    # - payments
+  columns: []
+    # - "*.id"
+
+output:
+  format: pretty
+  # color: true
+"#;
 
 /// Rules for ignoring tables and columns during comparison.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -101,6 +136,21 @@ ignore:
         assert_eq!(config.ignore.tables, vec!["_migrations"]);
         assert!(config.ignore.columns.is_empty());
         assert_eq!(config.output.format, None);
+    }
+
+    #[test]
+    fn parse_protected_config() {
+        let yaml = r#"
+protected:
+  tables:
+    - users
+    - payments
+  columns:
+    - "*.id"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.protected.tables, vec!["users", "payments"]);
+        assert_eq!(config.protected.columns, vec!["*.id"]);
     }
 
     #[test]

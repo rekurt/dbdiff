@@ -243,3 +243,94 @@ fn timeout_flag_accepted() {
         .assert()
         .success();
 }
+
+#[test]
+fn direction_up_flag_works() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "sql",
+            "--direction",
+            "up",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ALTER TABLE"));
+}
+
+#[test]
+fn direction_down_generates_rollback() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "sql",
+            "--direction",
+            "down",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DROP").or(predicate::str::contains("ADD COLUMN")));
+}
+
+#[test]
+fn direction_both_generates_up_and_down() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "sql",
+            "--direction",
+            "both",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-- === UP ==="))
+        .stdout(predicate::str::contains("-- === DOWN ==="));
+}
+
+#[test]
+fn json_output_includes_rollback() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"rollback\""));
+}
+
+#[test]
+fn init_creates_config_file() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd().current_dir(dir.path()).arg("init").assert().success();
+
+    let config_path = dir.path().join(".dbdiff.yml");
+    assert!(config_path.exists());
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("ignore:"));
+    assert!(content.contains("protected:"));
+}
+
+#[test]
+fn init_refuses_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".dbdiff.yml"), "existing").unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .code(2);
+}

@@ -62,6 +62,10 @@ pub struct Cli {
     /// SSL mode for database connections (disable, prefer, require)
     #[arg(long, value_enum, default_value = "prefer")]
     pub ssl_mode: SslMode,
+
+    /// Migration direction: up (forward), down (rollback), or both
+    #[arg(long, value_enum, default_value = "up")]
+    pub direction: MigrationDirection,
 }
 
 /// SSL mode for database connections.
@@ -82,8 +86,12 @@ pub enum Commands {
     Diff(DiffArgs),
     /// Test database connectivity and display server info
     Validate(ValidateArgs),
+    /// List tables in a database
+    Tables(TablesArgs),
     /// Generate shell completions
     Completions(CompletionsArgs),
+    /// Create a default .dbdiff.yml configuration file
+    Init,
 }
 
 /// Arguments for the diff subcommand (mirrors top-level args).
@@ -124,6 +132,38 @@ pub struct DiffArgs {
     /// Path to config file
     #[arg(long, value_name = "FILE", default_value = ".dbdiff.yml")]
     pub config: String,
+
+    /// Connection timeout in seconds
+    #[arg(long, value_name = "SECONDS", default_value = "10")]
+    pub timeout: u64,
+
+    /// SSL mode for database connections (disable, prefer, require)
+    #[arg(long, value_enum, default_value = "prefer")]
+    pub ssl_mode: SslMode,
+
+    /// Migration direction: up (forward), down (rollback), or both
+    #[arg(long, value_enum, default_value = "up")]
+    pub direction: MigrationDirection,
+}
+
+/// Migration direction for output.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
+pub enum MigrationDirection {
+    /// Generate forward migration only (default)
+    #[default]
+    Up,
+    /// Generate rollback migration only
+    Down,
+    /// Generate both forward and rollback migrations
+    Both,
+}
+
+/// Arguments for the tables subcommand.
+#[derive(Parser, Debug)]
+pub struct TablesArgs {
+    /// Database DSN to list tables from
+    #[arg(value_name = "DSN")]
+    pub dsn: String,
 
     /// Connection timeout in seconds
     #[arg(long, value_name = "SECONDS", default_value = "10")]
@@ -176,6 +216,7 @@ pub struct DiffParams {
     pub config: String,
     pub timeout: u64,
     pub ssl_mode: SslMode,
+    pub direction: MigrationDirection,
 }
 
 impl Cli {
@@ -184,7 +225,9 @@ impl Cli {
         match self.command {
             Some(Commands::Diff(args)) => ResolvedCommand::Diff(args.into_params()),
             Some(Commands::Validate(args)) => ResolvedCommand::Validate(args),
+            Some(Commands::Tables(args)) => ResolvedCommand::Tables(args),
             Some(Commands::Completions(args)) => ResolvedCommand::Completions(args),
+            Some(Commands::Init) => ResolvedCommand::Init,
             None => {
                 // Backward compat: top-level args are treated as diff
                 let source = self.source.unwrap_or_default();
@@ -211,6 +254,7 @@ impl Cli {
                     config: self.config,
                     timeout: self.timeout,
                     ssl_mode: self.ssl_mode,
+                    direction: self.direction,
                 })
             }
         }
@@ -248,6 +292,7 @@ impl DiffArgs {
             config: self.config,
             timeout: self.timeout,
             ssl_mode: self.ssl_mode,
+            direction: self.direction,
         }
     }
 }
@@ -255,7 +300,9 @@ impl DiffArgs {
 pub enum ResolvedCommand {
     Diff(DiffParams),
     Validate(ValidateArgs),
+    Tables(TablesArgs),
     Completions(CompletionsArgs),
+    Init,
 }
 
 impl DiffParams {
