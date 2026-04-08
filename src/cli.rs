@@ -90,6 +90,10 @@ pub struct Cli {
     /// Detect column/table renames instead of DROP+ADD (experimental)
     #[arg(long)]
     pub detect_renames: bool,
+
+    /// Force migration even when unique indexes would fail due to duplicate data (adds TRUNCATE TABLE)
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Color output mode.
@@ -226,6 +230,10 @@ pub struct DiffArgs {
     /// Detect column/table renames instead of DROP+ADD (experimental)
     #[arg(long)]
     pub detect_renames: bool,
+
+    /// Force migration even when unique indexes would fail due to duplicate data (adds TRUNCATE TABLE)
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Migration direction for output.
@@ -306,6 +314,7 @@ pub struct DiffParams {
     pub transaction: bool,
     pub concurrently: bool,
     pub detect_renames: bool,
+    pub force: bool,
 }
 
 impl Cli {
@@ -352,6 +361,7 @@ impl Cli {
                     transaction,
                     concurrently: self.concurrently,
                     detect_renames: self.detect_renames,
+                    force: self.force,
                 })
             }
         }
@@ -397,6 +407,7 @@ impl DiffArgs {
             transaction,
             concurrently: self.concurrently,
             detect_renames: self.detect_renames,
+            force: self.force,
         }
     }
 }

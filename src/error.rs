@@ -147,6 +147,10 @@ impl DbDiffError {
     pub fn invalid_arg(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidArg, message)
     }
+
+    pub fn query(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Connection, message)
+    }
 }
 
 /// Walk the error source chain and collect all messages.

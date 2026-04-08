@@ -6,6 +6,7 @@ use dbdiff::config;
 use dbdiff::loader;
 use dbdiff::loader::SqlDialect;
 use dbdiff::migration;
+use dbdiff::migration::MigrationStatement;
 use dbdiff::output;
 
 use super::helpers::{apply_color_mode, create_spinner, resolve_ssl_mode};
@@ -113,8 +114,124 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         );
     }
 
-    let up_statements = migration::generate_migration(&diff, migration_dialect, params.concurrently);
+    let mut up_statements = migration::generate_migration(&diff, migration_dialect, params.concurrently);
     let down_statements = migration::generate_rollback(&diff, migration_dialect, params.concurrently);
+
+    // Check for duplicate data that would prevent unique index creation
+    let is_pg_source = params.source.starts_with("postgres://")
+        || params.source.starts_with("postgresql://");
+
+    if is_pg_source {
+        let unique_indexes: Vec<(&str, &str, &[String])> = diff
+            .modified_tables
+            .iter()
+            .flat_map(|td| {
+                td.added_indexes.iter().filter(|idx| idx.is_unique).map(
+                    move |idx| {
+                        (
+                            td.table_name.as_str(),
+                            idx.name.as_str(),
+                            idx.columns.as_slice(),
+                        )
+                    },
+                )
+            })
+            .collect();
+
+        if !unique_indexes.is_empty() {
+            let pg_ssl = resolve_ssl_mode(params.ssl_mode);
+            let pg_ssl_mode = match pg_ssl {
+                loader::SslMode::Disable => loader::postgres::PgSslMode::Disable,
+                loader::SslMode::Prefer => loader::postgres::PgSslMode::Prefer,
+                loader::SslMode::Require => loader::postgres::PgSslMode::Require,
+            };
+
+            let mut duplicates = Vec::new();
+            for (table, idx_name, columns) in &unique_indexes {
+                match loader::postgres::check_duplicates(
+                    &params.source,
+                    pg_ssl_mode,
+                    table,
+                    idx_name,
+                    columns,
+                )
+                .await
+                {
+                    Ok(Some(dup)) => duplicates.push(dup),
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("Warning: failed to check duplicates for {table}: {e}");
+                    }
+                }
+            }
+
+            if !duplicates.is_empty() {
+                if !params.force {
+                    eprintln!();
+                    eprintln!("Error: Duplicate data found that would prevent unique index creation:");
+                    eprintln!();
+                    for dup in &duplicates {
+                        eprintln!(
+                            "  Table '{}', index '{}' on columns ({}): {} duplicate group(s)",
+                            dup.table,
+                            dup.index_name,
+                            dup.columns.join(", "),
+                            dup.duplicate_count
+                        );
+                        for sample in &dup.sample_values {
+                            eprintln!("    {sample}");
+                        }
+                    }
+                    eprintln!();
+                    eprintln!("Use --force to add TRUNCATE TABLE statements before creating unique indexes.");
+                    return Err(ExitCode::from(2));
+                }
+
+                // With --force: inject TRUNCATE TABLE before each unique index on tables with duplicates
+                let dup_tables: std::collections::HashSet<&str> =
+                    duplicates.iter().map(|d| d.table.as_str()).collect();
+
+                let mut patched = Vec::with_capacity(up_statements.len() + duplicates.len());
+                let mut truncated_tables: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+
+                for stmt in up_statements {
+                    // Detect CREATE UNIQUE INDEX on a table with duplicates.
+                    // Match both quoted (`ON "table"`) and unquoted (`ON table`) forms.
+                    let sql_matches_table = |sql: &str, table: &str| -> bool {
+                        sql.contains(&format!("ON \"{table}\""))
+                            || sql.contains(&format!("ON {table}("))
+                    };
+
+                    let needs_truncate = dup_tables.iter().any(|table| {
+                        stmt.sql.contains("CREATE UNIQUE INDEX")
+                            && sql_matches_table(&stmt.sql, table)
+                            && !truncated_tables.contains(*table)
+                    });
+
+                    if needs_truncate {
+                        if let Some(table) = dup_tables.iter().find(|t| {
+                            sql_matches_table(&stmt.sql, t)
+                        }) {
+                            patched.push(MigrationStatement {
+                                sql: format!(
+                                    "TRUNCATE TABLE \"{table}\";",
+                                ),
+                                warnings: vec![format!(
+                                    "TRUNCATE TABLE will delete ALL data from '{table}'. This is required because duplicate rows prevent creating a unique index."
+                                )],
+                                is_blocking: true,
+                            });
+                            truncated_tables.insert(table.to_string());
+                        }
+                    }
+                    patched.push(stmt);
+                }
+                up_statements = patched;
+            }
+        }
+    }
+
     let format = params.resolve_format(&cfg.output.format);
 
     let report = match params.direction {

@@ -417,14 +417,85 @@ fn normalize_default(default: &str) -> String {
     let re = RE.get_or_init(|| {
         regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?").expect("hardcoded regex must compile")
     });
-    let cleaned = re.replace_all(default, "").trim().to_string();
+    re.replace_all(default, "").trim().to_string()
+}
 
-    // Remove surrounding quotes from string defaults
-    if cleaned.starts_with('\'') && cleaned.ends_with('\'') && cleaned.len() > 2 {
-        return cleaned[1..cleaned.len() - 1].to_string();
+/// Information about duplicate rows that would prevent a unique index from being created.
+#[derive(Debug, Clone)]
+pub struct DuplicateInfo {
+    pub table: String,
+    pub index_name: String,
+    pub columns: Vec<String>,
+    pub duplicate_count: i64,
+    pub sample_values: Vec<String>,
+}
+
+/// Check for duplicate rows on columns that will become a unique index.
+///
+/// Connects to the database, runs a GROUP BY/HAVING query, and returns info about duplicates found.
+pub async fn check_duplicates(
+    dsn: &str,
+    ssl_mode: PgSslMode,
+    table: &str,
+    index_name: &str,
+    columns: &[String],
+) -> Result<Option<DuplicateInfo>, DbDiffError> {
+    let client = connect(dsn, ssl_mode).await?;
+
+    let col_list: String = columns
+        .iter()
+        .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Count rows with duplicate values
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM (SELECT {col_list} FROM \"{table}\" GROUP BY {col_list} HAVING COUNT(*) > 1) sub",
+        table = table.replace('"', "\"\""),
+    );
+
+    let row = client
+        .query_one(&count_sql, &[])
+        .await
+        .map_err(|e| DbDiffError::query(format!("duplicate check on {table}: {e}")))?;
+
+    let dup_count: i64 = row.get(0);
+    if dup_count == 0 {
+        return Ok(None);
     }
 
-    cleaned
+    // Get a sample of duplicate values for the warning message
+    let sample_sql = format!(
+        "SELECT {col_list}, COUNT(*) as cnt FROM \"{table}\" GROUP BY {col_list} HAVING COUNT(*) > 1 ORDER BY cnt DESC LIMIT 3",
+        table = table.replace('"', "\"\""),
+    );
+
+    let sample_rows = client
+        .query(&sample_sql, &[])
+        .await
+        .map_err(|e| DbDiffError::query(format!("duplicate sample on {table}: {e}")))?;
+
+    let sample_values: Vec<String> = sample_rows
+        .iter()
+        .map(|r| {
+            let vals: Vec<String> = (0..columns.len())
+                .map(|i| {
+                    r.try_get::<_, String>(i)
+                        .unwrap_or_else(|_| "NULL".to_string())
+                })
+                .collect();
+            let cnt: i64 = r.get(columns.len());
+            format!("({}) × {cnt}", vals.join(", "))
+        })
+        .collect();
+
+    Ok(Some(DuplicateInfo {
+        table: table.to_string(),
+        index_name: index_name.to_string(),
+        columns: columns.to_vec(),
+        duplicate_count: dup_count,
+        sample_values,
+    }))
 }
 
 /// Extract column names from an index definition string.
@@ -555,7 +626,7 @@ mod tests {
     #[test]
     fn test_normalize_default() {
         assert_eq!(normalize_default("now()"), "now()");
-        assert_eq!(normalize_default("'hello'::character varying"), "hello");
+        assert_eq!(normalize_default("'hello'::character varying"), "'hello'");
         assert_eq!(normalize_default("0"), "0");
         assert_eq!(normalize_default("true"), "true");
     }
@@ -635,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_normalize_default_with_cast() {
-        assert_eq!(normalize_default("'active'::character varying"), "active");
+        assert_eq!(normalize_default("'active'::character varying"), "'active'");
         assert_eq!(normalize_default("0::integer"), "0");
     }
 
