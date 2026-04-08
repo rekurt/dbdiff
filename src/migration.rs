@@ -34,14 +34,11 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         }
     }
 
-    // Phase 2: Replace modified views BEFORE column drops (views may reference dropped columns)
+    // Phase 2: DROP modified views before column changes (views may reference dropped columns;
+    // they will be recreated with new definition after columns are added in Phase 13)
     for vd in &diff.modified_views {
         statements.push(MigrationStatement {
-            sql: format!(
-                "CREATE OR REPLACE VIEW {} AS {};",
-                quote_ident(&vd.name, dialect),
-                vd.new_definition
-            ),
+            sql: format!("DROP VIEW IF EXISTS {};", quote_ident(&vd.name, dialect)),
             warnings: Vec::new(),
             is_blocking: false,
         });
@@ -300,7 +297,18 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             is_blocking: false,
         });
     }
-    // Modified views were already replaced in Phase 2
+    // Phase 13b: Recreate modified views with new definition (dropped in Phase 2)
+    for vd in &diff.modified_views {
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE VIEW {} AS {};",
+                quote_ident(&vd.name, dialect),
+                vd.new_definition
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
 
     statements
 }

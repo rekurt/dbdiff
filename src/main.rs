@@ -115,8 +115,12 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     let down_statements = migration::generate_rollback(&diff, migration_dialect);
     let format = params.resolve_format(&cfg.output.format);
 
-    // Build CI report for structured output and exit code logic
-    let report = CiReport::from_diff(&diff, &up_statements);
+    // Build CI report from the statements matching the selected direction
+    let ci_statements = match params.direction {
+        MigrationDirection::Down => &down_statements,
+        _ => &up_statements,
+    };
+    let report = CiReport::from_diff(&diff, ci_statements);
 
     match format {
         OutputFormat::Pretty => {
