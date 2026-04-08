@@ -15,6 +15,8 @@ pub enum SqlDialect {
     MySql,
     Sqlite,
     SqlFile,
+    /// JSON snapshot — carries all object types (views, enums, sequences)
+    Snapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +92,7 @@ pub async fn load_schema_with_ssl(
             .map_err(|e| DbDiffError::invalid_arg(format!("Failed to parse JSON snapshot: {e}")))?;
         return Ok(LoadedSchema {
             schema: snapshot.into(),
-            dialect: SqlDialect::SqlFile,
+            dialect: SqlDialect::Snapshot,
         });
     }
 

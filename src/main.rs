@@ -75,8 +75,10 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             return Err(ExitCode::from(2));
         }
         Err(_) => {
+            let safe_source = dbdiff::error::sanitize_dsn(&params.source);
+            let safe_target = dbdiff::error::sanitize_dsn(&params.target_source);
             let err = dbdiff::error::DbDiffError::timeout(
-                &format!("{} / {}", params.source, params.target_source),
+                &format!("{safe_source} / {safe_target}"),
                 params.timeout,
             );
             eprintln!("Error: {err}");
@@ -87,19 +89,18 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     config::filter::apply_ignore(&mut left.schema, &cfg.ignore);
     config::filter::apply_ignore(&mut right.schema, &cfg.ignore);
 
-    // When comparing against SQL files, clear object types that the SQL parser
-    // cannot load (views, enums, sequences) to avoid false diffs.
-    if left.dialect == SqlDialect::SqlFile || right.dialect == SqlDialect::SqlFile {
-        if left.dialect == SqlDialect::SqlFile {
-            right.schema.views.clear();
-            right.schema.enums.clear();
-            right.schema.sequences.clear();
-        }
-        if right.dialect == SqlDialect::SqlFile {
-            left.schema.views.clear();
-            left.schema.enums.clear();
-            left.schema.sequences.clear();
-        }
+    // When comparing against SQL files (not JSON snapshots), clear object types
+    // that the SQL parser cannot load (views, enums, sequences) to avoid false diffs.
+    // JSON snapshots (SqlDialect::Snapshot) DO carry these objects, so don't clear them.
+    if left.dialect == SqlDialect::SqlFile {
+        right.schema.views.clear();
+        right.schema.enums.clear();
+        right.schema.sequences.clear();
+    }
+    if right.dialect == SqlDialect::SqlFile {
+        left.schema.views.clear();
+        left.schema.enums.clear();
+        left.schema.sequences.clear();
     }
 
     if let Some(false) = cfg.output.color {
@@ -115,7 +116,8 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     }
 
     let migration_dialect = match (left.dialect, right.dialect) {
-        (SqlDialect::SqlFile, other) | (other, SqlDialect::SqlFile) => other,
+        (SqlDialect::SqlFile | SqlDialect::Snapshot, other)
+        | (other, SqlDialect::SqlFile | SqlDialect::Snapshot) => other,
         (l, r) if l == r => l,
         (l, r) => {
             eprintln!(

@@ -475,7 +475,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 15. Recreate removed tables (after enums/sequences they depend on)
+    // 15. Recreate removed tables with their indexes and constraints
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
@@ -484,6 +484,20 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             ],
             is_blocking: false,
         });
+        for idx in table.indexes.values() {
+            statements.push(MigrationStatement {
+                sql: create_index_sql(idx, dialect),
+                warnings: Vec::new(),
+                is_blocking: false,
+            });
+        }
+        for c in table.constraints.values() {
+            statements.push(MigrationStatement {
+                sql: add_constraint_sql(c, dialect),
+                warnings: Vec::new(),
+                is_blocking: false,
+            });
+        }
     }
 
     // 16. Re-add removed columns (data is lost)
@@ -611,7 +625,7 @@ fn create_index_sql(idx: &Index, dialect: SqlDialect) -> String {
     // MySQL/SQLite index columns are plain identifier names from information_schema
     // and need proper quoting.
     let cols = match dialect {
-        SqlDialect::Postgres | SqlDialect::SqlFile => idx.columns.join(", "),
+        SqlDialect::Postgres | SqlDialect::SqlFile | SqlDialect::Snapshot => idx.columns.join(", "),
         _ => idx
             .columns
             .iter()
