@@ -83,9 +83,8 @@ fn json_output_format() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"has_changes\": true"))
-        .stdout(predicate::str::contains("\"diff\""))
-        .stdout(predicate::str::contains("\"summary\""));
+        .stdout(predicate::str::contains("\"equal\": false"))
+        .stdout(predicate::str::contains("\"changes\""));
 }
 
 #[test]
@@ -227,7 +226,7 @@ fn summary_in_json_output() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"tables_added\""));
+        .stdout(predicate::str::contains("\"is_blocking\""));
 }
 
 #[test]
@@ -297,7 +296,7 @@ fn direction_both_generates_up_and_down() {
 }
 
 #[test]
-fn json_output_includes_rollback() {
+fn json_output_includes_changes() {
     cmd()
         .args([
             "tests/fixtures/schema_a.sql",
@@ -308,7 +307,7 @@ fn json_output_includes_rollback() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"rollback\""));
+        .stdout(predicate::str::contains("\"changes\""));
 }
 
 #[test]
@@ -359,7 +358,7 @@ fn snapshot_from_sql_file_to_json() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("\"has_changes\": false"));
+    assert!(stdout.contains("\"equal\": true"));
 
     // Verify that a JSON snapshot file can be used as a diff source
     // Create a minimal snapshot JSON
@@ -391,7 +390,7 @@ fn snapshot_from_sql_file_to_json() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"has_changes\""));
+        .stdout(predicate::str::contains("\"equal\""));
 
     // Verify _ is not needed
     drop(schema_sql);
@@ -410,4 +409,62 @@ fn tables_subcommand_with_invalid_source() {
         .assert()
         .failure()
         .code(2);
+}
+
+// === CI integration tests (from master) ===
+
+#[test]
+fn ci_fail_on_blocking_exits_3() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--ci",
+            "--fail-on-blocking",
+        ])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn ci_fail_on_blocking_no_blocking_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema_left = dir.path().join("left.sql");
+    std::fs::write(
+        &schema_left,
+        "CREATE TABLE users (id serial NOT NULL, email text NOT NULL);",
+    )
+    .unwrap();
+    let schema_right = dir.path().join("right.sql");
+    std::fs::write(
+        &schema_right,
+        "CREATE TABLE users (id serial NOT NULL, email text NOT NULL, bio text);",
+    )
+    .unwrap();
+    cmd()
+        .args([
+            schema_left.to_str().unwrap(),
+            "--schema",
+            schema_right.to_str().unwrap(),
+            "--ci",
+            "--fail-on-blocking",
+        ])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn yaml_output_format() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "yaml",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("equal: false"));
 }

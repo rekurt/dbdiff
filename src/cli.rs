@@ -39,6 +39,10 @@ pub struct Cli {
     #[arg(long)]
     pub ci: bool,
 
+    /// Exit with code 3 if any blocking operations are detected (requires --ci)
+    #[arg(long)]
+    pub fail_on_blocking: bool,
+
     /// Preview mode: show diff and migration without writing any files (default when --out is set)
     #[arg(long)]
     pub dry_run: bool,
@@ -159,6 +163,10 @@ pub struct DiffArgs {
     #[arg(long)]
     pub ci: bool,
 
+    /// Exit with code 3 if any blocking operations are detected (requires --ci)
+    #[arg(long)]
+    pub fail_on_blocking: bool,
+
     /// Preview mode: show diff and migration without writing any files (default when --out is set)
     #[arg(long)]
     pub dry_run: bool,
@@ -252,6 +260,7 @@ pub struct CompletionsArgs {
 pub enum OutputFormat {
     Pretty,
     Json,
+    Yaml,
     Sql,
 }
 
@@ -269,6 +278,7 @@ pub struct DiffParams {
     pub direction: MigrationDirection,
     pub color: ColorMode,
     pub explain: bool,
+    pub fail_on_blocking: bool,
 }
 
 impl Cli {
@@ -310,6 +320,7 @@ impl Cli {
                     direction: self.direction,
                     color: self.color,
                     explain: self.explain,
+                    fail_on_blocking: self.fail_on_blocking,
                 })
             }
         }
@@ -350,6 +361,7 @@ impl DiffArgs {
             direction: self.direction,
             color: self.color,
             explain: self.explain,
+            fail_on_blocking: self.fail_on_blocking,
         }
     }
 }
@@ -372,6 +384,7 @@ impl DiffParams {
         if let Some(ref fmt) = config_format {
             match fmt.to_lowercase().as_str() {
                 "json" => OutputFormat::Json,
+                "yaml" => OutputFormat::Yaml,
                 "sql" => OutputFormat::Sql,
                 _ => OutputFormat::Pretty,
             }

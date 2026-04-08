@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
 use crate::loader::SqlDialect;
 use crate::model::{Column, Constraint, ConstraintKind, Index, Table};
@@ -27,6 +29,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_constraint_sql(c, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -37,6 +40,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -61,6 +65,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     quote_ident(&col.name, dialect)
                 ),
                 warnings,
+                is_blocking: false,
             });
         }
     }
@@ -73,6 +78,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 "Dropping table '{}' will permanently delete all data.",
                 table.name
             )],
+            is_blocking: true, // DROP TABLE acquires AccessExclusiveLock
         });
     }
 
@@ -81,6 +87,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         statements.push(MigrationStatement {
             sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for e in &diff.removed_enums {
@@ -90,12 +97,14 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 "Dropping enum type '{}' will fail if any column still uses it.",
                 e.name
             )],
+            is_blocking: false,
         });
     }
     for s in &diff.removed_sequences {
         statements.push(MigrationStatement {
             sql: format!("DROP SEQUENCE {};", quote_ident(&s.name, dialect)),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
 
@@ -109,6 +118,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 values.join(", ")
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for ed in &diff.modified_enums {
@@ -120,6 +130,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     val
                 ),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
         if !ed.removed_values.is_empty() {
@@ -133,6 +144,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                      Removed values: {}. Recreate the type manually.",
                     ed.removed_values.join(", ")
                 )],
+                is_blocking: false,
             });
         }
     }
@@ -150,6 +162,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 s.max_value
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for sd in &diff.modified_sequences {
@@ -163,6 +176,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 s.max_value
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
 
@@ -171,12 +185,14 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
             warnings: Vec::new(),
+            is_blocking: false, // CREATE TABLE on new table is non-blocking
         });
 
         for idx in table.indexes.values() {
             statements.push(MigrationStatement {
                 sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false, // Index on brand-new table is non-blocking
             });
         }
 
@@ -184,6 +200,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: add_constraint_sql(c, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -192,6 +209,8 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     for table_diff in &diff.modified_tables {
         for col in &table_diff.added_columns {
             let warnings = add_column_warnings(col);
+            // ADD COLUMN ... NOT NULL requires table rewrite / AccessExclusiveLock
+            let blocking = !col.is_nullable;
             statements.push(MigrationStatement {
                 sql: format!(
                     "ALTER TABLE {} ADD COLUMN {};",
@@ -199,6 +218,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     column_definition_sql(col, dialect)
                 ),
                 warnings,
+                is_blocking: blocking,
             });
         }
     }
@@ -218,6 +238,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     "Consider using CREATE INDEX CONCURRENTLY to avoid locking the table."
                         .to_string(),
                 ],
+                is_blocking: true, // CREATE INDEX (without CONCURRENTLY) blocks writes
             });
         }
     }
@@ -228,6 +249,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: add_constraint_sql(c, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -241,6 +263,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 view.definition
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for vd in &diff.modified_views {
@@ -251,6 +274,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 vd.new_definition
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
 
@@ -266,6 +290,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         statements.push(MigrationStatement {
             sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for vd in &diff.modified_views {
@@ -276,6 +301,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                 vd.old_definition
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
     for view in &diff.removed_views {
@@ -286,6 +312,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                 view.definition
             ),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
 
@@ -295,6 +322,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             statements.push(MigrationStatement {
                 sql: drop_constraint_sql(c, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -305,6 +333,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -319,6 +348,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                     quote_ident(&col.name, dialect)
                 ),
                 warnings: vec!["Rollback: dropping column that was added.".into()],
+                is_blocking: false,
             });
         }
     }
@@ -328,6 +358,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         statements.push(MigrationStatement {
             sql: format!("DROP TABLE {};", quote_ident(&table.name, dialect)),
             warnings: Vec::new(),
+            is_blocking: false,
         });
     }
 
@@ -338,6 +369,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             warnings: vec![
                 "Rollback recreates the table structure, but data is permanently lost.".into(),
             ],
+            is_blocking: false,
         });
     }
 
@@ -353,6 +385,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                 warnings: vec![
                     "Rollback re-adds the column, but original data is permanently lost.".into(),
                 ],
+                is_blocking: false,
             });
         }
     }
@@ -363,6 +396,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             statements.push(MigrationStatement {
                 sql: add_constraint_sql(c, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -373,6 +407,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             statements.push(MigrationStatement {
                 sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -381,10 +416,13 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
 }
 
 /// A single migration SQL statement with optional safety warnings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MigrationStatement {
     pub sql: String,
     pub warnings: Vec<String>,
+    /// Whether this statement acquires heavy locks (e.g. AccessExclusiveLock)
+    /// or performs a full table rewrite.
+    pub is_blocking: bool,
 }
 
 fn quote_ident(name: &str, dialect: SqlDialect) -> String {
@@ -542,7 +580,7 @@ fn generate_column_alterations(
         let ColumnDiff { old, new } = col_diff;
         let table = &table_diff.table_name;
 
-        // Type change
+        // Type change — blocking: requires table rewrite / AccessExclusiveLock
         if old.data_type != new.data_type {
             match dialect {
                 SqlDialect::MySql => stmts.push(MigrationStatement {
@@ -556,6 +594,7 @@ fn generate_column_alterations(
                          and table lock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
                 SqlDialect::Sqlite => stmts.push(MigrationStatement {
                     sql: format!(
@@ -568,6 +607,7 @@ fn generate_column_alterations(
                          Recreate table '{table}' with the desired column definition.",
                         new.name
                     )],
+                    is_blocking: true,
                 }),
                 _ => stmts.push(MigrationStatement {
                     sql: format!(
@@ -581,12 +621,16 @@ fn generate_column_alterations(
                          and AccessExclusiveLock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
             }
         }
 
         // Nullability change
         if old.is_nullable != new.is_nullable {
+            // SET NOT NULL is blocking (full table scan + AccessExclusiveLock)
+            // DROP NOT NULL is non-blocking
+            let blocking = !new.is_nullable;
             match dialect {
                 SqlDialect::MySql => {
                     let warning = if new.is_nullable {
@@ -609,6 +653,7 @@ fn generate_column_alterations(
                             column_definition_sql(new, dialect)
                         ),
                         warnings: vec![warning],
+                        is_blocking: blocking,
                     });
                 }
                 SqlDialect::Sqlite => {
@@ -623,6 +668,7 @@ fn generate_column_alterations(
                              Recreate table '{table}' with the desired column definition.",
                             new.name
                         )],
+                        is_blocking: blocking,
                     });
                 }
                 _ => {
@@ -634,6 +680,7 @@ fn generate_column_alterations(
                                 quote_ident(&new.name, dialect)
                             ),
                             warnings: Vec::new(),
+                            is_blocking: false,
                         });
                     } else {
                         stmts.push(MigrationStatement {
@@ -647,13 +694,14 @@ fn generate_column_alterations(
                                  This acquires AccessExclusiveLock.",
                                 new.name
                             )],
+                            is_blocking: true,
                         });
                     }
                 }
             }
         }
 
-        // Default change
+        // Default change — non-blocking (metadata-only on modern PG)
         if old.default != new.default {
             match &new.default {
                 Some(default) => {
@@ -664,6 +712,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
                 None => {
@@ -674,6 +723,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
             }

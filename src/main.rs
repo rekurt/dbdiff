@@ -4,6 +4,7 @@ use std::time::Instant;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use dbdiff::ci::{self, CiReport};
 use dbdiff::cli::{
     Cli, ColorMode, DiffParams, MigrationDirection, OutputFormat, ResolvedCommand, SnapshotArgs,
     SslMode, TablesArgs, ValidateArgs,
@@ -114,6 +115,9 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     let down_statements = migration::generate_rollback(&diff, migration_dialect);
     let format = params.resolve_format(&cfg.output.format);
 
+    // Build CI report for structured output and exit code logic
+    let report = CiReport::from_diff(&diff, &up_statements);
+
     match format {
         OutputFormat::Pretty => {
             output::print_diff(&diff);
@@ -167,20 +171,12 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             output::print_summary(&diff);
         }
         OutputFormat::Json => {
-            let json = serde_json::json!({
-                "diff": diff,
-                "migration": up_statements.iter().map(|s| &s.sql).collect::<Vec<_>>(),
-                "rollback": down_statements.iter().map(|s| &s.sql).collect::<Vec<_>>(),
-                "warnings": up_statements.iter()
-                    .flat_map(|s| s.warnings.iter())
-                    .collect::<Vec<_>>(),
-                "has_changes": !diff.is_empty(),
-                "summary": output::diff_summary(&diff),
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json).unwrap_or_default()
-            );
+            let json = serde_json::to_string_pretty(&report).unwrap_or_default();
+            println!("{json}");
+        }
+        OutputFormat::Yaml => {
+            let yaml = serde_yaml::to_string(&report).unwrap_or_default();
+            print!("{yaml}");
         }
         OutputFormat::Sql => match params.direction {
             MigrationDirection::Up => {
@@ -222,8 +218,17 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         }
     }
 
-    if params.ci && !diff.is_empty() {
-        return Err(ExitCode::from(1));
+    // GitHub Actions annotations (auto-detect from env)
+    if params.ci && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        report.emit_github_annotations();
+    }
+
+    // CI mode: determine exit code from report
+    if params.ci {
+        let code = report.exit_code(params.fail_on_blocking);
+        if code != ci::EXIT_OK {
+            return Err(ExitCode::from(code));
+        }
     }
 
     Ok(())
