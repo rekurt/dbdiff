@@ -164,11 +164,11 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
             .unwrap_or_else(|| columns.clone());
         let on_delete = cap
             .get(5)
-            .map(|m| m.as_str().to_string())
+            .map(|m| m.as_str().to_uppercase())
             .filter(|s| s != "NO ACTION" && s != "RESTRICT");
         let on_update = cap
             .get(6)
-            .map(|m| m.as_str().to_string())
+            .map(|m| m.as_str().to_uppercase())
             .filter(|s| s != "NO ACTION" && s != "RESTRICT");
 
         return Some(Constraint {

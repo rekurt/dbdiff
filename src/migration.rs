@@ -390,35 +390,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 11. Recreate removed tables (data is lost)
-    for table in &diff.removed_tables {
-        statements.push(MigrationStatement {
-            sql: create_table_sql(table, dialect),
-            warnings: vec![
-                "Rollback recreates the table structure, but data is permanently lost.".into(),
-            ],
-            is_blocking: false,
-        });
-    }
-
-    // 10. Re-add removed columns (data is lost)
-    for table_diff in &diff.modified_tables {
-        for col in &table_diff.removed_columns {
-            statements.push(MigrationStatement {
-                sql: format!(
-                    "ALTER TABLE {} ADD COLUMN {};",
-                    quote_ident(&table_diff.table_name, dialect),
-                    column_definition_sql(col, dialect)
-                ),
-                warnings: vec![
-                    "Rollback re-adds the column, but original data is permanently lost.".into(),
-                ],
-                is_blocking: false,
-            });
-        }
-    }
-
-    // 11. Recreate removed enums
+    // 11. Recreate removed enums (before tables that may use them)
     for e in &diff.removed_enums {
         let values: Vec<String> = e.values.iter().map(|v| format!("'{v}'")).collect();
         statements.push(MigrationStatement {
@@ -495,7 +467,35 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 15. Re-add removed constraints
+    // 15. Recreate removed tables (after enums/sequences they depend on)
+    for table in &diff.removed_tables {
+        statements.push(MigrationStatement {
+            sql: create_table_sql(table, dialect),
+            warnings: vec![
+                "Rollback recreates the table structure, but data is permanently lost.".into(),
+            ],
+            is_blocking: false,
+        });
+    }
+
+    // 16. Re-add removed columns (data is lost)
+    for table_diff in &diff.modified_tables {
+        for col in &table_diff.removed_columns {
+            statements.push(MigrationStatement {
+                sql: format!(
+                    "ALTER TABLE {} ADD COLUMN {};",
+                    quote_ident(&table_diff.table_name, dialect),
+                    column_definition_sql(col, dialect)
+                ),
+                warnings: vec![
+                    "Rollback re-adds the column, but original data is permanently lost.".into(),
+                ],
+                is_blocking: false,
+            });
+        }
+    }
+
+    // 17. Re-add removed constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.removed_constraints {
             statements.push(MigrationStatement {
