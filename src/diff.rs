@@ -381,44 +381,62 @@ fn detect_table_renames(
     added: &mut Vec<Table>,
     renames: &mut Vec<TableRename>,
 ) -> Vec<(Table, Table)> {
+    // Phase 1: collect all candidate mappings (removed_idx -> Vec<(added_idx, confidence)>)
+    let all_candidates: Vec<Vec<(usize, RenameConfidence)>> = removed
+        .iter()
+        .map(|rem| {
+            added
+                .iter()
+                .enumerate()
+                .filter_map(|(ai, add)| {
+                    // High confidence: identical column definitions
+                    if rem.columns == add.columns {
+                        return Some((ai, RenameConfidence::High));
+                    }
+                    // Medium confidence: same column count, ≥80% column name overlap
+                    if rem.columns.len() == add.columns.len() && !rem.columns.is_empty() {
+                        let overlap = rem
+                            .columns
+                            .keys()
+                            .filter(|k| add.columns.contains_key(*k))
+                            .count();
+                        if overlap * 100 / rem.columns.len() >= 80 {
+                            return Some((ai, RenameConfidence::Medium));
+                        }
+                    }
+                    None
+                })
+                .collect()
+        })
+        .collect();
+
+    // Phase 2: require bijective matching — accept only when both the removed
+    // table has exactly one candidate AND that added table is claimed by only
+    // one removed table.
     let mut matched_removed = Vec::new();
     let mut matched_added = Vec::new();
 
-    for (ri, rem) in removed.iter().enumerate() {
-        let candidates: Vec<(usize, RenameConfidence)> = added
-            .iter()
-            .enumerate()
-            .filter(|(ai, _)| !matched_added.contains(ai))
-            .filter_map(|(ai, add)| {
-                // High confidence: identical column definitions
-                if rem.columns == add.columns {
-                    return Some((ai, RenameConfidence::High));
-                }
-                // Medium confidence: same column count, ≥80% column name overlap
-                if rem.columns.len() == add.columns.len() && !rem.columns.is_empty() {
-                    let overlap = rem
-                        .columns
-                        .keys()
-                        .filter(|k| add.columns.contains_key(*k))
-                        .count();
-                    if overlap * 100 / rem.columns.len() >= 80 {
-                        return Some((ai, RenameConfidence::Medium));
-                    }
-                }
-                None
-            })
-            .collect();
-
-        if candidates.len() == 1 {
-            let (ai, confidence) = &candidates[0];
-            matched_removed.push(ri);
-            matched_added.push(*ai);
-            renames.push(TableRename {
-                old_name: rem.name.clone(),
-                new_name: added[*ai].name.clone(),
-                confidence: *confidence,
-            });
+    for (ri, candidates) in all_candidates.iter().enumerate() {
+        if candidates.len() != 1 {
+            continue;
         }
+        let (ai, confidence) = &candidates[0];
+        // Check reverse uniqueness: this added table must be a sole candidate
+        // for only this removed table.
+        let claimants = all_candidates
+            .iter()
+            .filter(|cands| cands.iter().any(|(a, _)| a == ai))
+            .count();
+        if claimants != 1 {
+            continue;
+        }
+        matched_removed.push(ri);
+        matched_added.push(*ai);
+        renames.push(TableRename {
+            old_name: removed[ri].name.clone(),
+            new_name: added[*ai].name.clone(),
+            confidence: *confidence,
+        });
     }
 
     // Collect matched pairs before removing from the vectors.
