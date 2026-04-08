@@ -19,6 +19,12 @@ pub fn print_diff(diff: &SchemaDiff) {
         for idx in table.indexes.values() {
             println!("{}", format!("  + index   {}", idx.definition()).green());
         }
+        for c in table.constraints.values() {
+            println!(
+                "{}",
+                format!("  + constraint  {:<16} {}", c.name, c.definition()).green()
+            );
+        }
         println!();
     }
 
@@ -29,6 +35,12 @@ pub fn print_diff(diff: &SchemaDiff) {
             println!(
                 "{}",
                 format!("  - column  {:<20} {}", col.name, col_type_str(col)).red()
+            );
+        }
+        for c in table.constraints.values() {
+            println!(
+                "{}",
+                format!("  - constraint  {:<16} {}", c.name, c.definition()).red()
             );
         }
         println!();

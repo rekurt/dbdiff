@@ -29,7 +29,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_constraint_sql(c, dialect),
                 warnings: Vec::new(),
-                is_blocking: false,
+                is_blocking: true, // DROP CONSTRAINT acquires AccessExclusiveLock
             });
         }
     }
@@ -40,7 +40,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
-                is_blocking: false,
+                is_blocking: true, // DROP INDEX acquires AccessExclusiveLock
             });
         }
     }
@@ -65,7 +65,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     quote_ident(&col.name, dialect)
                 ),
                 warnings,
-                is_blocking: false,
+                is_blocking: true, // DROP COLUMN acquires AccessExclusiveLock
             });
         }
     }
@@ -282,10 +282,15 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 }
 
 /// Generate rollback (DOWN) migration that reverses the diff.
+///
+/// Order: drop added views -> drop added enums/sequences -> drop added constraints/indexes ->
+/// drop added columns -> drop added tables -> recreate removed tables ->
+/// re-add removed columns -> recreate removed enums/sequences ->
+/// recreate removed constraints/indexes -> recreate removed views
 pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
-    // Reverse views
+    // 1. Drop views that were added (reverse of CREATE VIEW)
     for view in &diff.added_views {
         statements.push(MigrationStatement {
             sql: format!("DROP VIEW {};", quote_ident(&view.name, dialect)),
@@ -293,6 +298,8 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             is_blocking: false,
         });
     }
+
+    // 2. Revert modified views to old definition
     for vd in &diff.modified_views {
         statements.push(MigrationStatement {
             sql: format!(
@@ -304,41 +311,48 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
             is_blocking: false,
         });
     }
-    for view in &diff.removed_views {
+
+    // 3. Reverse added enums (drop them)
+    for e in &diff.added_enums {
         statements.push(MigrationStatement {
-            sql: format!(
-                "CREATE VIEW {} AS {};",
-                quote_ident(&view.name, dialect),
-                view.definition
-            ),
+            sql: format!("DROP TYPE {};", quote_ident(&e.name, dialect)),
             warnings: Vec::new(),
             is_blocking: false,
         });
     }
 
-    // Reverse constraints (drop added, re-add removed)
+    // 4. Reverse added sequences (drop them)
+    for s in &diff.added_sequences {
+        statements.push(MigrationStatement {
+            sql: format!("DROP SEQUENCE {};", quote_ident(&s.name, dialect)),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 5. Drop added constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.added_constraints {
             statements.push(MigrationStatement {
                 sql: drop_constraint_sql(c, dialect),
                 warnings: Vec::new(),
-                is_blocking: false,
+                is_blocking: true,
             });
         }
     }
 
-    // Reverse indexes
+    // 6. Drop added indexes
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.added_indexes {
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
-                is_blocking: false,
+                is_blocking: true,
             });
         }
     }
 
-    // Reverse added columns (drop them)
+    // 7. Drop added columns
     for table_diff in &diff.modified_tables {
         for col in &table_diff.added_columns {
             statements.push(MigrationStatement {
@@ -348,21 +362,21 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
                     quote_ident(&col.name, dialect)
                 ),
                 warnings: vec!["Rollback: dropping column that was added.".into()],
-                is_blocking: false,
+                is_blocking: true,
             });
         }
     }
 
-    // Reverse added tables (drop them)
+    // 8. Drop added tables
     for table in &diff.added_tables {
         statements.push(MigrationStatement {
             sql: format!("DROP TABLE {};", quote_ident(&table.name, dialect)),
             warnings: Vec::new(),
-            is_blocking: false,
+            is_blocking: true,
         });
     }
 
-    // Reverse removed tables (recreate them)
+    // 9. Recreate removed tables (data is lost)
     for table in &diff.removed_tables {
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
@@ -373,7 +387,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // Reverse removed columns (re-add them)
+    // 10. Re-add removed columns (data is lost)
     for table_diff in &diff.modified_tables {
         for col in &table_diff.removed_columns {
             statements.push(MigrationStatement {
@@ -390,26 +404,114 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         }
     }
 
-    // Reverse removed constraints (re-add them)
-    for table_diff in &diff.modified_tables {
-        for c in &table_diff.removed_constraints {
+    // 11. Recreate removed enums
+    for e in &diff.removed_enums {
+        let values: Vec<String> = e.values.iter().map(|v| format!("'{v}'")).collect();
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE TYPE {} AS ENUM ({});",
+                quote_ident(&e.name, dialect),
+                values.join(", ")
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 12. Reverse modified enums (cannot remove added values in PG, note only)
+    for ed in &diff.modified_enums {
+        if !ed.added_values.is_empty() {
             statements.push(MigrationStatement {
-                sql: add_constraint_sql(c, dialect),
+                sql: format!(
+                    "-- cannot remove values from enum type {}",
+                    quote_ident(&ed.name, dialect)
+                ),
+                warnings: vec![format!(
+                    "Rollback cannot remove enum values added to '{}'. Manual intervention needed.",
+                    ed.name
+                )],
+                is_blocking: false,
+            });
+        }
+        for val in &ed.removed_values {
+            statements.push(MigrationStatement {
+                sql: format!(
+                    "ALTER TYPE {} ADD VALUE '{}';",
+                    quote_ident(&ed.name, dialect),
+                    val
+                ),
                 warnings: Vec::new(),
                 is_blocking: false,
             });
         }
     }
 
-    // Reverse removed indexes (recreate them)
+    // 13. Recreate removed sequences
+    for s in &diff.removed_sequences {
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE SEQUENCE {} AS {} START {} INCREMENT {} MINVALUE {} MAXVALUE {};",
+                quote_ident(&s.name, dialect),
+                s.data_type,
+                s.start_value,
+                s.increment,
+                s.min_value,
+                s.max_value
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 14. Reverse modified sequences
+    for sd in &diff.modified_sequences {
+        let s = &sd.old;
+        statements.push(MigrationStatement {
+            sql: format!(
+                "ALTER SEQUENCE {} INCREMENT {} MINVALUE {} MAXVALUE {};",
+                quote_ident(&s.name, dialect),
+                s.increment,
+                s.min_value,
+                s.max_value
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 15. Re-add removed constraints
+    for table_diff in &diff.modified_tables {
+        for c in &table_diff.removed_constraints {
+            statements.push(MigrationStatement {
+                sql: add_constraint_sql(c, dialect),
+                warnings: Vec::new(),
+                is_blocking: true,
+            });
+        }
+    }
+
+    // 16. Recreate removed indexes
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.removed_indexes {
             statements.push(MigrationStatement {
                 sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
-                is_blocking: false,
+                is_blocking: true,
             });
         }
+    }
+
+    // 17. Recreate removed views (after tables are back)
+    for view in &diff.removed_views {
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE VIEW {} AS {};",
+                quote_ident(&view.name, dialect),
+                view.definition
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
     }
 
     statements
@@ -1233,6 +1335,274 @@ mod tests {
 
         // Embedded backtick gets escaped
         assert_eq!(quote_ident("a`b", my), "`a``b`");
+    }
+
+    #[test]
+    fn drop_column_is_blocking() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("old".into(), col("old", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        assert!(stmts[0].is_blocking, "DROP COLUMN should be blocking");
+    }
+
+    #[test]
+    fn drop_index_is_blocking() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.indexes.insert(
+            "idx".into(),
+            Index {
+                name: "idx".into(),
+                table_name: "users".into(),
+                columns: vec!["id".into()],
+                is_unique: false,
+            },
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        assert!(stmts[0].is_blocking, "DROP INDEX should be blocking");
+    }
+
+    #[test]
+    fn create_table_is_not_blocking() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        assert!(!stmts[0].is_blocking, "CREATE TABLE should not be blocking");
+    }
+
+    #[test]
+    fn drop_table_is_blocking() {
+        let mut left = Schema::new();
+        let mut t = Table::new("old");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("old".into(), t);
+        let right = Schema::new();
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.sql.contains("DROP TABLE") && s.is_blocking),
+            "DROP TABLE should be blocking"
+        );
+    }
+
+    #[test]
+    fn mysql_fk_drop_uses_drop_foreign_key() {
+        use crate::model::{Constraint, ConstraintKind};
+
+        let mut left = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("user_id".into(), col("user_id", "integer", false, None));
+        t.constraints.insert(
+            "fk_user".into(),
+            Constraint {
+                name: "fk_user".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::ForeignKey {
+                    columns: vec!["user_id".into()],
+                    ref_table: "users".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: None,
+                },
+            },
+        );
+        left.tables.insert("orders".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("user_id".into(), col("user_id", "integer", false, None));
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        assert!(
+            stmts[0].sql.contains("DROP FOREIGN KEY"),
+            "MySQL should use DROP FOREIGN KEY, got: {}",
+            stmts[0].sql
+        );
+    }
+
+    #[test]
+    fn mysql_unique_drop_uses_drop_index() {
+        use crate::model::{Constraint, ConstraintKind};
+
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", false, None));
+        t.constraints.insert(
+            "unique_email".into(),
+            Constraint {
+                name: "unique_email".into(),
+                table_name: "users".into(),
+                kind: ConstraintKind::Unique {
+                    columns: vec!["email".into()],
+                },
+            },
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("email".into(), col("email", "varchar(255)", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql);
+
+        assert!(
+            stmts[0].sql.contains("DROP INDEX"),
+            "MySQL should use DROP INDEX for unique constraints, got: {}",
+            stmts[0].sql
+        );
+    }
+
+    #[test]
+    fn constraint_add_generates_alter_table() {
+        use crate::model::{Constraint, ConstraintKind};
+
+        let mut left = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("user_id".into(), col("user_id", "integer", false, None));
+        left.tables.insert("orders".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("user_id".into(), col("user_id", "integer", false, None));
+        t.constraints.insert(
+            "fk_user".into(),
+            Constraint {
+                name: "fk_user".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::ForeignKey {
+                    columns: vec!["user_id".into()],
+                    ref_table: "users".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: Some("CASCADE".into()),
+                    on_update: None,
+                },
+            },
+        );
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+
+        assert!(stmts
+            .iter()
+            .any(|s| s.sql.contains("ADD CONSTRAINT fk_user FOREIGN KEY")));
+        assert!(stmts.iter().any(|s| s.sql.contains("ON DELETE CASCADE")));
+    }
+
+    #[test]
+    fn rollback_reverses_added_table() {
+        let left = Schema::new();
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+
+        assert!(rollback.iter().any(|s| s.sql.contains("DROP TABLE orders")));
+        assert!(
+            rollback
+                .iter()
+                .any(|s| s.sql.contains("DROP TABLE") && s.is_blocking),
+            "Rollback DROP TABLE should be blocking"
+        );
+    }
+
+    #[test]
+    fn rollback_reverses_removed_table() {
+        let mut left = Schema::new();
+        let mut t = Table::new("legacy");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("legacy".into(), t);
+        let right = Schema::new();
+
+        let diff = diff_schemas(&left, &right);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+
+        assert!(rollback
+            .iter()
+            .any(|s| s.sql.contains("CREATE TABLE legacy")));
+    }
+
+    #[test]
+    fn rollback_drop_column_is_blocking() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("name".into(), col("name", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+
+        let drop_col = rollback
+            .iter()
+            .find(|s| s.sql.contains("DROP COLUMN"))
+            .unwrap();
+        assert!(
+            drop_col.is_blocking,
+            "Rollback DROP COLUMN should be blocking"
+        );
     }
 
     #[test]
