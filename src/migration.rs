@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
 use crate::loader::SqlDialect;
 use crate::model::{Column, Index, Table};
@@ -21,6 +23,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: drop_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false,
             });
         }
     }
@@ -45,6 +48,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     quote_ident(&col.name, dialect)
                 ),
                 warnings,
+                is_blocking: false,
             });
         }
     }
@@ -57,6 +61,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 "Dropping table '{}' will permanently delete all data.",
                 table.name
             )],
+            is_blocking: true, // DROP TABLE acquires AccessExclusiveLock
         });
     }
 
@@ -65,6 +70,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
             warnings: Vec::new(),
+            is_blocking: false, // CREATE TABLE on new table is non-blocking
         });
 
         // Indexes for new table
@@ -72,6 +78,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             statements.push(MigrationStatement {
                 sql: create_index_sql(idx, dialect),
                 warnings: Vec::new(),
+                is_blocking: false, // Index on brand-new table is non-blocking
             });
         }
     }
@@ -80,6 +87,8 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     for table_diff in &diff.modified_tables {
         for col in &table_diff.added_columns {
             let warnings = add_column_warnings(col);
+            // ADD COLUMN ... NOT NULL requires table rewrite / AccessExclusiveLock
+            let blocking = !col.is_nullable;
             statements.push(MigrationStatement {
                 sql: format!(
                     "ALTER TABLE {} ADD COLUMN {};",
@@ -87,6 +96,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     column_definition_sql(col, dialect)
                 ),
                 warnings,
+                is_blocking: blocking,
             });
         }
     }
@@ -106,6 +116,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                     "Consider using CREATE INDEX CONCURRENTLY to avoid locking the table."
                         .to_string(),
                 ],
+                is_blocking: true, // CREATE INDEX (without CONCURRENTLY) blocks writes
             });
         }
     }
@@ -114,10 +125,13 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 }
 
 /// A single migration SQL statement with optional safety warnings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MigrationStatement {
     pub sql: String,
     pub warnings: Vec<String>,
+    /// Whether this statement acquires heavy locks (e.g. AccessExclusiveLock)
+    /// or performs a full table rewrite.
+    pub is_blocking: bool,
 }
 
 fn quote_ident(name: &str, dialect: SqlDialect) -> String {
@@ -223,7 +237,7 @@ fn generate_column_alterations(
         let ColumnDiff { old, new } = col_diff;
         let table = &table_diff.table_name;
 
-        // Type change
+        // Type change — blocking: requires table rewrite / AccessExclusiveLock
         if old.data_type != new.data_type {
             match dialect {
                 SqlDialect::MySql => stmts.push(MigrationStatement {
@@ -237,6 +251,7 @@ fn generate_column_alterations(
                          and table lock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
                 SqlDialect::Sqlite => stmts.push(MigrationStatement {
                     sql: format!(
@@ -249,6 +264,7 @@ fn generate_column_alterations(
                          Recreate table '{table}' with the desired column definition.",
                         new.name
                     )],
+                    is_blocking: true,
                 }),
                 _ => stmts.push(MigrationStatement {
                     sql: format!(
@@ -262,12 +278,16 @@ fn generate_column_alterations(
                          and AccessExclusiveLock.",
                         old.data_type, new.data_type
                     )],
+                    is_blocking: true,
                 }),
             }
         }
 
         // Nullability change
         if old.is_nullable != new.is_nullable {
+            // SET NOT NULL is blocking (full table scan + AccessExclusiveLock)
+            // DROP NOT NULL is non-blocking
+            let blocking = !new.is_nullable;
             match dialect {
                 SqlDialect::MySql => {
                     let warning = if new.is_nullable {
@@ -290,6 +310,7 @@ fn generate_column_alterations(
                             column_definition_sql(new, dialect)
                         ),
                         warnings: vec![warning],
+                        is_blocking: blocking,
                     });
                 }
                 SqlDialect::Sqlite => {
@@ -304,6 +325,7 @@ fn generate_column_alterations(
                              Recreate table '{table}' with the desired column definition.",
                             new.name
                         )],
+                        is_blocking: blocking,
                     });
                 }
                 _ => {
@@ -315,6 +337,7 @@ fn generate_column_alterations(
                                 quote_ident(&new.name, dialect)
                             ),
                             warnings: Vec::new(),
+                            is_blocking: false,
                         });
                     } else {
                         stmts.push(MigrationStatement {
@@ -328,13 +351,14 @@ fn generate_column_alterations(
                                  This acquires AccessExclusiveLock.",
                                 new.name
                             )],
+                            is_blocking: true,
                         });
                     }
                 }
             }
         }
 
-        // Default change
+        // Default change — non-blocking (metadata-only on modern PG)
         if old.default != new.default {
             match &new.default {
                 Some(default) => {
@@ -345,6 +369,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
                 None => {
@@ -355,6 +380,7 @@ fn generate_column_alterations(
                             quote_ident(&new.name, dialect)
                         ),
                         warnings: Vec::new(),
+                        is_blocking: false,
                     });
                 }
             }
@@ -426,10 +452,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "ALTER TABLE users DROP COLUMN old_field;"
-        );
+        assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
         assert!(stmts[0].warnings[0].contains("destructive"));
     }
 
@@ -505,10 +528,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "CREATE INDEX idx_orders_id ON orders(id);"
-        );
+        assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
     }
 
     #[test]

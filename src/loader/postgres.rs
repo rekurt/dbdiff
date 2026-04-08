@@ -9,12 +9,13 @@ use crate::model::{Column, Index, Schema, Table};
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
     let host = sanitize_dsn(dsn);
 
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
-        .await
-        .map_err(|e| DbDiffError::PostgresConnect {
-            host: host.clone(),
-            source: e,
-        })?;
+    let (client, connection) =
+        tokio_postgres::connect(dsn, NoTls)
+            .await
+            .map_err(|e| DbDiffError::PostgresConnect {
+                host: host.clone(),
+                source: e,
+            })?;
 
     // Spawn the connection handler
     tokio::spawn(async move {
@@ -139,8 +140,7 @@ fn normalize_default(default: &str) -> String {
     // Remove type casts like ::character varying, ::text, etc.
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?")
-            .expect("hardcoded regex must compile")
+        regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?").expect("hardcoded regex must compile")
     });
     let cleaned = re.replace_all(default, "").trim().to_string();
 
@@ -343,9 +343,7 @@ mod tests {
     fn test_parse_index_table_name_with_parens() {
         // Table name containing '(' should not confuse the column-list finder.
         assert_eq!(
-            parse_index_columns(
-                "CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"
-            ),
+            parse_index_columns("CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"),
             vec!["col1", "col2"]
         );
     }
@@ -354,9 +352,7 @@ mod tests {
     fn test_parse_index_quoted_parens_in_columns() {
         // Parentheses inside double-quoted identifiers should be ignored during depth scan.
         assert_eq!(
-            parse_index_columns(
-                "CREATE INDEX idx ON t USING btree (\"a)\", b)"
-            ),
+            parse_index_columns("CREATE INDEX idx ON t USING btree (\"a)\", b)"),
             vec!["\"a)\"", "b"]
         );
     }

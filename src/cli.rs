@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long)]
     pub ci: bool,
 
+    /// Exit with code 3 if any blocking operations are detected (requires --ci)
+    #[arg(long)]
+    pub fail_on_blocking: bool,
+
     /// Show diff and migration without writing any files
     #[arg(long)]
     pub dry_run: bool,
@@ -45,6 +49,7 @@ pub struct Args {
 pub enum OutputFormat {
     Pretty,
     Json,
+    Yaml,
     Sql,
 }
 
@@ -68,6 +73,7 @@ impl Args {
         if let Some(ref fmt) = config_format {
             match fmt.to_lowercase().as_str() {
                 "json" => OutputFormat::Json,
+                "yaml" => OutputFormat::Yaml,
                 "sql" => OutputFormat::Sql,
                 _ => OutputFormat::Pretty,
             }

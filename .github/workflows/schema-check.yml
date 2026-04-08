@@ -1,0 +1,35 @@
+name: Schema drift check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "migrations/**"
+      - "*.sql"
+
+jobs:
+  schema-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dbdiff
+        run: cargo install --path .
+
+      - name: Compare prod vs staging
+        env:
+          PROD_DSN: ${{ secrets.PROD_DSN }}
+          STAGING_DSN: ${{ secrets.STAGING_DSN }}
+        run: |
+          dbdiff "$PROD_DSN" "$STAGING_DSN" \
+            --ci \
+            --fail-on-blocking \
+            --format json > drift-report.json
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-drift-report
+          path: drift-report.json
