@@ -161,7 +161,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
         .query(
             "SELECT con.conname AS constraint_name, \
                     rel.relname AS table_name, \
-                    con.contype, \
+                    con.contype::text, \
                     ( \
                         SELECT array_agg(att.attname ORDER BY u.ord) \
                         FROM unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord) \
@@ -173,7 +173,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
                         FROM unnest(con.confkey) WITH ORDINALITY AS u(attnum, ord) \
                         JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = u.attnum \
                     ) AS ref_columns, \
-                    con.confdeltype, con.confupdtype \
+                    con.confdeltype::text, con.confupdtype::text \
              FROM pg_constraint con \
              JOIN pg_class rel ON con.conrelid = rel.oid \
              JOIN pg_namespace nsp ON rel.relnamespace = nsp.oid \

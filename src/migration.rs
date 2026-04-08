@@ -7,19 +7,19 @@ use crate::model::{Column, Constraint, ConstraintKind, Index, Table};
 /// Generate migration SQL statements from a schema diff.
 ///
 /// Statements are ordered for safe execution:
-/// 1. DROP CONSTRAINTs (FK first, so tables can be dropped)
-/// 2. DROP INDEXes
-/// 3. DROP COLUMNs
-/// 4. DROP TABLEs
-/// 5. DROP VIEWs / DROP TYPEs / DROP SEQUENCEs
-/// 6. CREATE ENUMs / ALTER ENUMs (add values)
+/// 1. DROP CONSTRAINTs
+/// 2. DROP/REPLACE VIEWs (before column drops — views may reference dropped columns)
+/// 3. DROP INDEXes
+/// 4. DROP COLUMNs
+/// 5. DROP removed VIEWs / DROP TABLEs / DROP TYPEs / DROP SEQUENCEs
+/// 6. CREATE ENUMs / ALTER ENUMs
 /// 7. CREATE SEQUENCEs
-/// 8. CREATE TABLEs
+/// 8. CREATE TABLEs + ADD CONSTRAINTs for new tables
 /// 9. ADD COLUMNs
 /// 10. ALTER COLUMNs
 /// 11. CREATE INDEXes
-/// 12. ADD CONSTRAINTs
-/// 13. CREATE/REPLACE VIEWs
+/// 12. ADD CONSTRAINTs for modified tables
+/// 13. CREATE new VIEWs
 pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
@@ -34,7 +34,20 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         }
     }
 
-    // Phase 2: DROP INDEXes from modified tables
+    // Phase 2: Replace modified views BEFORE column drops (views may reference dropped columns)
+    for vd in &diff.modified_views {
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE OR REPLACE VIEW {} AS {};",
+                quote_ident(&vd.name, dialect),
+                vd.new_definition
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // Phase 3: DROP INDEXes from modified tables
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.removed_indexes {
             statements.push(MigrationStatement {
@@ -287,17 +300,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
             is_blocking: false,
         });
     }
-    for vd in &diff.modified_views {
-        statements.push(MigrationStatement {
-            sql: format!(
-                "CREATE OR REPLACE VIEW {} AS {};",
-                quote_ident(&vd.name, dialect),
-                vd.new_definition
-            ),
-            warnings: Vec::new(),
-            is_blocking: false,
-        });
-    }
+    // Modified views were already replaced in Phase 2
 
     statements
 }
@@ -321,20 +324,9 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 2. Revert modified views to old definition
-    for vd in &diff.modified_views {
-        statements.push(MigrationStatement {
-            sql: format!(
-                "CREATE OR REPLACE VIEW {} AS {};",
-                quote_ident(&vd.name, dialect),
-                vd.old_definition
-            ),
-            warnings: Vec::new(),
-            is_blocking: false,
-        });
-    }
+    // (Modified views are restored later, after columns are re-added)
 
-    // 3. Drop added constraints
+    // 2. Drop added constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.added_constraints {
             statements.push(MigrationStatement {
@@ -525,7 +517,20 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         }
     }
 
-    // 17. Recreate removed views (after tables are back)
+    // 17. Revert modified views (after columns are restored)
+    for vd in &diff.modified_views {
+        statements.push(MigrationStatement {
+            sql: format!(
+                "CREATE OR REPLACE VIEW {} AS {};",
+                quote_ident(&vd.name, dialect),
+                vd.old_definition
+            ),
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
+    // 18. Recreate removed views (after tables are back)
     for view in &diff.removed_views {
         statements.push(MigrationStatement {
             sql: format!(
