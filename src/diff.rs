@@ -172,11 +172,22 @@ pub fn diff_schemas_with_options(
 
     // Detect table renames: match removed -> added by identical column sets
     if detect_renames {
-        detect_table_renames(
+        let rename_pairs = detect_table_renames(
             &mut removed_tables,
             &mut added_tables,
             &mut renamed_tables,
         );
+
+        // Renamed tables may still differ in indexes/constraints — diff them
+        // and emit modification entries under the new name so that migration
+        // generation picks up these changes after the RENAME TABLE.
+        for (old_table, new_table) in &rename_pairs {
+            let table_diff =
+                diff_tables(&new_table.name, old_table, new_table, detect_renames);
+            if !table_diff.is_empty() {
+                modified_tables.push(table_diff);
+            }
+        }
     }
 
     // Tables in both -> compare
@@ -363,11 +374,13 @@ fn detect_column_renames(
 }
 
 /// Detect table renames by matching removed tables to added tables with identical column sets.
+/// Returns the matched `(old_table, new_table)` pairs so the caller can diff non-column
+/// properties (indexes, constraints) that may still differ after the rename.
 fn detect_table_renames(
     removed: &mut Vec<Table>,
     added: &mut Vec<Table>,
     renames: &mut Vec<TableRename>,
-) {
+) -> Vec<(Table, Table)> {
     let mut matched_removed = Vec::new();
     let mut matched_added = Vec::new();
 
@@ -408,6 +421,13 @@ fn detect_table_renames(
         }
     }
 
+    // Collect matched pairs before removing from the vectors.
+    let pairs: Vec<(Table, Table)> = matched_removed
+        .iter()
+        .zip(matched_added.iter())
+        .map(|(&ri, &ai)| (removed[ri].clone(), added[ai].clone()))
+        .collect();
+
     matched_removed.sort_unstable();
     matched_added.sort_unstable();
     for &i in matched_removed.iter().rev() {
@@ -416,6 +436,8 @@ fn detect_table_renames(
     for &i in matched_added.iter().rev() {
         added.remove(i);
     }
+
+    pairs
 }
 
 fn diff_views(
@@ -1197,6 +1219,39 @@ mod tests {
         assert!(diff.renamed_tables.is_empty());
         assert_eq!(diff.removed_tables.len(), 1);
         assert_eq!(diff.added_tables.len(), 1);
+    }
+
+    #[test]
+    fn table_rename_with_index_diff_emits_modified() {
+        let mut left = Schema::new();
+        let mut t = Table::new("old_name");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_old".into(),
+            make_index("idx_old", "old_name", &["id"], false),
+        );
+        left.tables.insert("old_name".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("new_name");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_new".into(),
+            make_index("idx_new", "new_name", &["id"], true),
+        );
+        right.tables.insert("new_name".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert_eq!(diff.renamed_tables.len(), 1);
+        assert_eq!(diff.renamed_tables[0].old_name, "old_name");
+        assert_eq!(diff.renamed_tables[0].new_name, "new_name");
+        // The index difference must appear in modified_tables, not be silently dropped.
+        assert_eq!(diff.modified_tables.len(), 1);
+        assert_eq!(diff.modified_tables[0].table_name, "new_name");
+        assert_eq!(diff.modified_tables[0].removed_indexes.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_indexes.len(), 1);
     }
 
     #[test]
