@@ -155,13 +155,106 @@ fn normalize_default(default: &str) -> String {
 /// Extract column names from an index definition string.
 /// Example: "CREATE INDEX idx_name ON table_name USING btree (col1, col2)"
 fn parse_index_columns(indexdef: &str) -> Vec<String> {
-    if let Some(start) = indexdef.rfind('(') {
-        if let Some(end) = indexdef.rfind(')') {
-            let cols = &indexdef[start + 1..end];
-            return cols.split(',').map(|c| c.trim().to_string()).collect();
+    // PostgreSQL indexdef format: CREATE [UNIQUE] INDEX name ON [schema.]table [USING method] (columns)
+    // Use ASCII case-insensitive search to find " ON " without byte-offset issues from
+    // to_uppercase() on non-ASCII characters (e.g. 'ı' → 'I' changes byte length).
+    let on_pos = match indexdef
+        .as_bytes()
+        .windows(4)
+        .position(|w| w.eq_ignore_ascii_case(b" ON "))
+    {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    // Find the opening '(' of the column list, skipping any '(' inside double-quoted
+    // identifiers (e.g. table names containing parentheses).
+    let after_on = &indexdef[on_pos + 4..];
+    let open = match find_unquoted_char(after_on, '(') {
+        Some(p) => on_pos + 4 + p,
+        None => return Vec::new(),
+    };
+
+    // Walk forward to find the matching close paren, skipping quoted content.
+    let close = match find_matching_close_paren(indexdef, open) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let cols_str = &indexdef[open + 1..close];
+
+    // Split on commas at top level (depth 0), quote-aware.
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    let mut in_quotes = false;
+    for ch in cols_str.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            current.push(ch);
+        } else if in_quotes {
+            current.push(ch);
+        } else {
+            match ch {
+                '(' => {
+                    paren_depth += 1;
+                    current.push(ch);
+                }
+                ')' => {
+                    paren_depth -= 1;
+                    current.push(ch);
+                }
+                ',' if paren_depth == 0 => {
+                    result.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
         }
     }
-    Vec::new()
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+
+    result
+}
+
+/// Find the byte position of `target` that is not inside double-quoted identifiers.
+fn find_unquoted_char(s: &str, target: char) -> Option<usize> {
+    let mut in_quotes = false;
+    for (i, ch) in s.char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && ch == target {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the matching close paren for the '(' at `open`, skipping quoted content.
+fn find_matching_close_paren(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut in_quotes = false;
+    for (i, ch) in s[open + 1..].char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + 1 + i);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -202,5 +295,97 @@ mod tests {
             parse_index_columns("CREATE UNIQUE INDEX idx ON table (email)"),
             vec!["email"]
         );
+    }
+
+    #[test]
+    fn test_parse_expression_index_columns() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx_lower_email ON users USING btree (lower(email))"),
+            vec!["lower(email)"]
+        );
+    }
+
+    #[test]
+    fn test_parse_sorted_index_columns() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx ON events USING btree (created_at DESC)"),
+            vec!["created_at DESC"]
+        );
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON events USING btree (user_id ASC, created_at DESC)"
+            ),
+            vec!["user_id ASC", "created_at DESC"]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_with_quoted_identifiers() {
+        assert_eq!(
+            parse_index_columns("CREATE INDEX idx ON users USING btree (\"Email\", \"FirstName\")"),
+            vec!["\"Email\"", "\"FirstName\""]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_with_non_ascii_identifiers() {
+        // 'ı' (U+0131, 2 bytes UTF-8) uppercases to 'I' (1 byte), shifting byte offsets.
+        // This verifies we don't use uppercased offsets to slice the original string.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX \"ındex_türkçe\" ON \"schéma\".\"tablo\" USING btree (\"sütun\")"
+            ),
+            vec!["\"sütun\""]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_table_name_with_parens() {
+        // Table name containing '(' should not confuse the column-list finder.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"
+            ),
+            vec!["col1", "col2"]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_quoted_parens_in_columns() {
+        // Parentheses inside double-quoted identifiers should be ignored during depth scan.
+        assert_eq!(
+            parse_index_columns(
+                "CREATE INDEX idx ON t USING btree (\"a)\", b)"
+            ),
+            vec!["\"a)\"", "b"]
+        );
+    }
+
+    #[test]
+    fn test_parse_index_no_parens_returns_empty() {
+        assert!(parse_index_columns("not a valid index def").is_empty());
+    }
+
+    #[test]
+    fn test_normalize_default_with_cast() {
+        assert_eq!(normalize_default("'active'::character varying"), "active");
+        assert_eq!(normalize_default("0::integer"), "0");
+    }
+
+    #[test]
+    fn test_normalize_default_preserves_functions() {
+        assert_eq!(normalize_default("now()"), "now()");
+        assert_eq!(normalize_default("gen_random_uuid()"), "gen_random_uuid()");
+    }
+
+    #[test]
+    fn test_normalize_type_all_variants() {
+        assert_eq!(normalize_type("time without time zone", None), "time");
+        assert_eq!(normalize_type("time with time zone", None), "timetz");
+        assert_eq!(normalize_type("double precision", None), "float8");
+        assert_eq!(normalize_type("real", None), "float4");
+        assert_eq!(normalize_type("smallint", None), "smallint");
+        assert_eq!(normalize_type("character", Some(1)), "char(1)");
+        assert_eq!(normalize_type("character", None), "char");
     }
 }
