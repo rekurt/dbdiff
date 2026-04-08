@@ -7,6 +7,7 @@ use crate::model::{Column, Constraint, EnumType, Index, Schema, Sequence, Table,
 pub struct SchemaDiff {
     pub added_tables: Vec<Table>,
     pub removed_tables: Vec<Table>,
+    pub renamed_tables: Vec<TableRename>,
     pub modified_tables: Vec<TableDiff>,
     pub unchanged_tables: Vec<String>,
     pub added_views: Vec<View>,
@@ -25,6 +26,7 @@ impl SchemaDiff {
     pub fn is_empty(&self) -> bool {
         self.added_tables.is_empty()
             && self.removed_tables.is_empty()
+            && self.renamed_tables.is_empty()
             && self.modified_tables.is_empty()
             && self.added_views.is_empty()
             && self.removed_views.is_empty()
@@ -44,6 +46,7 @@ pub struct TableDiff {
     pub table_name: String,
     pub added_columns: Vec<Column>,
     pub removed_columns: Vec<Column>,
+    pub renamed_columns: Vec<ColumnRename>,
     pub modified_columns: Vec<ColumnDiff>,
     pub unchanged_columns: Vec<String>,
     pub added_indexes: Vec<Index>,
@@ -56,6 +59,7 @@ impl TableDiff {
     pub fn is_empty(&self) -> bool {
         self.added_columns.is_empty()
             && self.removed_columns.is_empty()
+            && self.renamed_columns.is_empty()
             && self.modified_columns.is_empty()
             && self.added_indexes.is_empty()
             && self.removed_indexes.is_empty()
@@ -97,14 +101,58 @@ pub struct SequenceDiff {
     pub new: Sequence,
 }
 
+/// A detected column rename.
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnRename {
+    pub old: Column,
+    pub new: Column,
+    pub confidence: RenameConfidence,
+}
+
+/// A detected table rename.
+#[derive(Debug, Clone, Serialize)]
+pub struct TableRename {
+    pub old_name: String,
+    pub new_name: String,
+    pub confidence: RenameConfidence,
+}
+
+/// Confidence level for rename detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RenameConfidence {
+    /// type + nullability + default all match
+    High,
+    /// type + nullability match, default differs
+    Medium,
+}
+
+impl std::fmt::Display for RenameConfidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::High => write!(f, "high"),
+            Self::Medium => write!(f, "medium"),
+        }
+    }
+}
+
 /// Compare two schemas and produce a diff.
 ///
 /// `left` is the current state (e.g. production).
 /// `right` is the desired state (e.g. staging or .sql file).
 /// The generated migration will bring `left` to match `right`.
 pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
+    diff_schemas_with_options(left, right, false)
+}
+
+/// Compare two schemas with rename detection option.
+pub fn diff_schemas_with_options(
+    left: &Schema,
+    right: &Schema,
+    detect_renames: bool,
+) -> SchemaDiff {
     let mut added_tables = Vec::new();
     let mut removed_tables = Vec::new();
+    let mut renamed_tables = Vec::new();
     let mut modified_tables = Vec::new();
     let mut unchanged_tables = Vec::new();
 
@@ -122,10 +170,38 @@ pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
         }
     }
 
+    // Detect table renames: match removed -> added by identical column sets
+    if detect_renames {
+        let rename_pairs = detect_table_renames(
+            &mut removed_tables,
+            &mut added_tables,
+            &mut renamed_tables,
+        );
+
+        // Renamed tables may still differ in indexes/constraints — diff them
+        // and emit modification entries under the new name so that migration
+        // generation picks up these changes after the RENAME TABLE.
+        for (old_table, new_table) in &rename_pairs {
+            let mut table_diff =
+                diff_tables(&new_table.name, old_table, new_table, detect_renames);
+            // Rebase removed objects to the new table name so that DROP
+            // statements generated after RENAME TABLE target the correct name.
+            for idx in &mut table_diff.removed_indexes {
+                idx.table_name = new_table.name.clone();
+            }
+            for c in &mut table_diff.removed_constraints {
+                c.table_name = new_table.name.clone();
+            }
+            if !table_diff.is_empty() {
+                modified_tables.push(table_diff);
+            }
+        }
+    }
+
     // Tables in both -> compare
     for (name, left_table) in &left.tables {
         if let Some(right_table) = right.tables.get(name) {
-            let table_diff = diff_tables(name, left_table, right_table);
+            let table_diff = diff_tables(name, left_table, right_table, detect_renames);
             if table_diff.is_empty() {
                 unchanged_tables.push(name.clone());
             } else {
@@ -147,6 +223,7 @@ pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
     SchemaDiff {
         added_tables,
         removed_tables,
+        renamed_tables,
         modified_tables,
         unchanged_tables,
         added_views,
@@ -161,9 +238,10 @@ pub fn diff_schemas(left: &Schema, right: &Schema) -> SchemaDiff {
     }
 }
 
-fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
+fn diff_tables(name: &str, left: &Table, right: &Table, detect_renames: bool) -> TableDiff {
     let mut added_columns = Vec::new();
     let mut removed_columns = Vec::new();
+    let mut renamed_columns = Vec::new();
     let mut modified_columns = Vec::new();
     let mut unchanged_columns = Vec::new();
 
@@ -177,6 +255,11 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         if !right.columns.contains_key(col_name) {
             removed_columns.push(col.clone());
         }
+    }
+
+    // Detect column renames before finalizing added/removed lists
+    if detect_renames {
+        detect_column_renames(&mut removed_columns, &mut added_columns, &mut renamed_columns);
     }
 
     for (col_name, left_col) in &left.columns {
@@ -234,6 +317,7 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         table_name: name.to_string(),
         added_columns,
         removed_columns,
+        renamed_columns,
         modified_columns,
         unchanged_columns,
         added_indexes,
@@ -241,6 +325,145 @@ fn diff_tables(name: &str, left: &Table, right: &Table) -> TableDiff {
         added_constraints,
         removed_constraints,
     }
+}
+
+/// Detect column renames by matching removed columns to added columns with compatible types.
+/// Only produces a rename when exactly one removed column matches one added column (1:1).
+fn detect_column_renames(
+    removed: &mut Vec<Column>,
+    added: &mut Vec<Column>,
+    renames: &mut Vec<ColumnRename>,
+) {
+    let mut matched_removed = Vec::new();
+    let mut matched_added = Vec::new();
+
+    for (ri, rem) in removed.iter().enumerate() {
+        // Find added columns with matching type + nullability
+        let candidates: Vec<(usize, RenameConfidence)> = added
+            .iter()
+            .enumerate()
+            .filter(|(ai, _)| !matched_added.contains(ai))
+            .filter_map(|(ai, add)| {
+                if rem.data_type == add.data_type && rem.is_nullable == add.is_nullable {
+                    let confidence = if rem.default == add.default {
+                        RenameConfidence::High
+                    } else {
+                        RenameConfidence::Medium
+                    };
+                    Some((ai, confidence))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Only match if exactly one candidate (unambiguous)
+        if candidates.len() == 1 {
+            let (ai, confidence) = &candidates[0];
+            matched_removed.push(ri);
+            matched_added.push(*ai);
+            renames.push(ColumnRename {
+                old: rem.clone(),
+                new: added[*ai].clone(),
+                confidence: *confidence,
+            });
+        }
+    }
+
+    // Remove matched entries (in reverse order to preserve indices)
+    matched_removed.sort_unstable();
+    matched_added.sort_unstable();
+    for &i in matched_removed.iter().rev() {
+        removed.remove(i);
+    }
+    for &i in matched_added.iter().rev() {
+        added.remove(i);
+    }
+}
+
+/// Detect table renames by matching removed tables to added tables with identical column sets.
+/// Returns the matched `(old_table, new_table)` pairs so the caller can diff non-column
+/// properties (indexes, constraints) that may still differ after the rename.
+fn detect_table_renames(
+    removed: &mut Vec<Table>,
+    added: &mut Vec<Table>,
+    renames: &mut Vec<TableRename>,
+) -> Vec<(Table, Table)> {
+    // Phase 1: collect all candidate mappings (removed_idx -> Vec<(added_idx, confidence)>)
+    let all_candidates: Vec<Vec<(usize, RenameConfidence)>> = removed
+        .iter()
+        .map(|rem| {
+            added
+                .iter()
+                .enumerate()
+                .filter_map(|(ai, add)| {
+                    // High confidence: identical column definitions
+                    if rem.columns == add.columns {
+                        return Some((ai, RenameConfidence::High));
+                    }
+                    // Medium confidence: same column count, ≥80% column name overlap
+                    if rem.columns.len() == add.columns.len() && !rem.columns.is_empty() {
+                        let overlap = rem
+                            .columns
+                            .keys()
+                            .filter(|k| add.columns.contains_key(*k))
+                            .count();
+                        if overlap * 100 / rem.columns.len() >= 80 {
+                            return Some((ai, RenameConfidence::Medium));
+                        }
+                    }
+                    None
+                })
+                .collect()
+        })
+        .collect();
+
+    // Phase 2: require bijective matching — accept only when both the removed
+    // table has exactly one candidate AND that added table is claimed by only
+    // one removed table.
+    let mut matched_removed = Vec::new();
+    let mut matched_added = Vec::new();
+
+    for (ri, candidates) in all_candidates.iter().enumerate() {
+        if candidates.len() != 1 {
+            continue;
+        }
+        let (ai, confidence) = &candidates[0];
+        // Check reverse uniqueness: this added table must be a sole candidate
+        // for only this removed table.
+        let claimants = all_candidates
+            .iter()
+            .filter(|cands| cands.iter().any(|(a, _)| a == ai))
+            .count();
+        if claimants != 1 {
+            continue;
+        }
+        matched_removed.push(ri);
+        matched_added.push(*ai);
+        renames.push(TableRename {
+            old_name: removed[ri].name.clone(),
+            new_name: added[*ai].name.clone(),
+            confidence: *confidence,
+        });
+    }
+
+    // Collect matched pairs before removing from the vectors.
+    let pairs: Vec<(Table, Table)> = matched_removed
+        .iter()
+        .zip(matched_added.iter())
+        .map(|(&ri, &ai)| (removed[ri].clone(), added[ai].clone()))
+        .collect();
+
+    matched_removed.sort_unstable();
+    matched_added.sort_unstable();
+    for &i in matched_removed.iter().rev() {
+        removed.remove(i);
+    }
+    for &i in matched_added.iter().rev() {
+        added.remove(i);
+    }
+
+    pairs
 }
 
 fn diff_views(
@@ -764,5 +987,321 @@ mod tests {
         assert!(diff.modified_enums[0].reordered);
         assert!(diff.modified_enums[0].added_values.is_empty());
         assert!(diff.modified_enums[0].removed_values.is_empty());
+    }
+
+    // ── Primary Key tests ──
+
+    #[test]
+    fn pk_constraint_added_detected() {
+        let mut left_table = Table::new("users");
+        left_table
+            .columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+
+        let mut right_table = Table::new("users");
+        right_table
+            .columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        right_table.constraints.insert(
+            "users_pkey".into(),
+            Constraint {
+                name: "users_pkey".into(),
+                table_name: "users".into(),
+                kind: ConstraintKind::PrimaryKey {
+                    columns: vec!["id".into()],
+                },
+            },
+        );
+
+        let mut left = Schema::new();
+        left.tables.insert("users".into(), left_table);
+        let mut right = Schema::new();
+        right.tables.insert("users".into(), right_table);
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_tables.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_constraints.len(), 1);
+        assert!(matches!(
+            diff.modified_tables[0].added_constraints[0].kind,
+            ConstraintKind::PrimaryKey { .. }
+        ));
+    }
+
+    #[test]
+    fn pk_constraint_changed_detected() {
+        let mut left_table = Table::new("orders");
+        left_table
+            .columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        left_table.columns.insert(
+            "tenant_id".into(),
+            make_column("tenant_id", "integer", false, None),
+        );
+        left_table.constraints.insert(
+            "orders_pkey".into(),
+            Constraint {
+                name: "orders_pkey".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::PrimaryKey {
+                    columns: vec!["id".into()],
+                },
+            },
+        );
+
+        let mut right_table = Table::new("orders");
+        right_table
+            .columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        right_table.columns.insert(
+            "tenant_id".into(),
+            make_column("tenant_id", "integer", false, None),
+        );
+        right_table.constraints.insert(
+            "orders_pkey".into(),
+            Constraint {
+                name: "orders_pkey".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::PrimaryKey {
+                    columns: vec!["tenant_id".into(), "id".into()],
+                },
+            },
+        );
+
+        let mut left = Schema::new();
+        left.tables.insert("orders".into(), left_table);
+        let mut right = Schema::new();
+        right.tables.insert("orders".into(), right_table);
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_tables.len(), 1);
+        // Changed PK = removed old + added new
+        assert_eq!(diff.modified_tables[0].removed_constraints.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_constraints.len(), 1);
+    }
+
+    // ── Rename detection tests ──
+
+    #[test]
+    fn rename_detection_disabled_by_default() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("old_name".into(), make_column("old_name", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("new_name".into(), make_column("new_name", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        assert!(diff.modified_tables[0].renamed_columns.is_empty());
+        assert_eq!(diff.modified_tables[0].removed_columns.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_columns.len(), 1);
+    }
+
+    #[test]
+    fn column_rename_high_confidence() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.columns
+            .insert("email_addr".into(), make_column("email_addr", "varchar(255)", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), make_column("email", "varchar(255)", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert_eq!(diff.modified_tables[0].renamed_columns.len(), 1);
+        assert_eq!(diff.modified_tables[0].renamed_columns[0].old.name, "email_addr");
+        assert_eq!(diff.modified_tables[0].renamed_columns[0].new.name, "email");
+        assert_eq!(diff.modified_tables[0].renamed_columns[0].confidence, RenameConfidence::High);
+        assert!(diff.modified_tables[0].added_columns.is_empty());
+        assert!(diff.modified_tables[0].removed_columns.is_empty());
+    }
+
+    #[test]
+    fn column_rename_medium_confidence_when_default_differs() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns.insert(
+            "is_enabled".into(),
+            make_column("is_enabled", "bool", false, Some("true")),
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns.insert(
+            "is_active".into(),
+            make_column("is_active", "bool", false, Some("false")),
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert_eq!(diff.modified_tables[0].renamed_columns.len(), 1);
+        assert_eq!(
+            diff.modified_tables[0].renamed_columns[0].confidence,
+            RenameConfidence::Medium
+        );
+    }
+
+    #[test]
+    fn column_rename_not_detected_when_types_differ() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("old_col".into(), make_column("old_col", "integer", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("new_col".into(), make_column("new_col", "text", false, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert!(diff.modified_tables[0].renamed_columns.is_empty());
+        assert_eq!(diff.modified_tables[0].removed_columns.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_columns.len(), 1);
+    }
+
+    #[test]
+    fn column_rename_ambiguous_two_candidates() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("a".into(), make_column("a", "text", true, None));
+        t.columns
+            .insert("b".into(), make_column("b", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("x".into(), make_column("x", "text", true, None));
+        t.columns
+            .insert("y".into(), make_column("y", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        // Ambiguous: a could match x or y, b could match x or y
+        // No rename should be detected
+        assert!(diff.modified_tables[0].renamed_columns.is_empty());
+        assert_eq!(diff.modified_tables[0].removed_columns.len(), 2);
+        assert_eq!(diff.modified_tables[0].added_columns.len(), 2);
+    }
+
+    #[test]
+    fn table_rename_high_confidence_identical_columns() {
+        let mut left = Schema::new();
+        let mut t = Table::new("user_logs");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.columns
+            .insert("message".into(), make_column("message", "text", true, None));
+        left.tables.insert("user_logs".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("audit_trail");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.columns
+            .insert("message".into(), make_column("message", "text", true, None));
+        right.tables.insert("audit_trail".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert_eq!(diff.renamed_tables.len(), 1);
+        assert_eq!(diff.renamed_tables[0].old_name, "user_logs");
+        assert_eq!(diff.renamed_tables[0].new_name, "audit_trail");
+        assert_eq!(diff.renamed_tables[0].confidence, RenameConfidence::High);
+        assert!(diff.added_tables.is_empty());
+        assert!(diff.removed_tables.is_empty());
+    }
+
+    #[test]
+    fn table_rename_not_detected_when_columns_differ() {
+        let mut left = Schema::new();
+        let mut t = Table::new("old_table");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        left.tables.insert("old_table".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("new_table");
+        t.columns
+            .insert("uuid".into(), make_column("uuid", "uuid", false, None));
+        right.tables.insert("new_table".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert!(diff.renamed_tables.is_empty());
+        assert_eq!(diff.removed_tables.len(), 1);
+        assert_eq!(diff.added_tables.len(), 1);
+    }
+
+    #[test]
+    fn table_rename_with_index_diff_emits_modified() {
+        let mut left = Schema::new();
+        let mut t = Table::new("old_name");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_old".into(),
+            make_index("idx_old", "old_name", &["id"], false),
+        );
+        left.tables.insert("old_name".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("new_name");
+        t.columns
+            .insert("id".into(), make_column("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_new".into(),
+            make_index("idx_new", "new_name", &["id"], true),
+        );
+        right.tables.insert("new_name".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        assert_eq!(diff.renamed_tables.len(), 1);
+        assert_eq!(diff.renamed_tables[0].old_name, "old_name");
+        assert_eq!(diff.renamed_tables[0].new_name, "new_name");
+        // The index difference must appear in modified_tables, not be silently dropped.
+        assert_eq!(diff.modified_tables.len(), 1);
+        assert_eq!(diff.modified_tables[0].table_name, "new_name");
+        assert_eq!(diff.modified_tables[0].removed_indexes.len(), 1);
+        assert_eq!(diff.modified_tables[0].added_indexes.len(), 1);
+    }
+
+    #[test]
+    fn table_rename_ambiguous_two_candidates() {
+        let mut left = Schema::new();
+        for name in ["table_a", "table_b"] {
+            let mut t = Table::new(name);
+            t.columns
+                .insert("id".into(), make_column("id", "integer", false, None));
+            left.tables.insert(name.into(), t);
+        }
+
+        let mut right = Schema::new();
+        for name in ["table_x", "table_y"] {
+            let mut t = Table::new(name);
+            t.columns
+                .insert("id".into(), make_column("id", "integer", false, None));
+            right.tables.insert(name.into(), t);
+        }
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        // Both removed could match both added → ambiguous → no rename
+        assert!(diff.renamed_tables.is_empty());
+        assert_eq!(diff.removed_tables.len(), 2);
+        assert_eq!(diff.added_tables.len(), 2);
     }
 }

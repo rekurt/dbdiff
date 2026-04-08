@@ -59,23 +59,47 @@ fn load_columns(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
         quote_identifier(table_name)
     ))?;
 
+    let mut pk_columns: Vec<(i32, String)> = Vec::new();
+
     let columns = stmt.query_map([], |row| {
         let name: String = row.get(1)?;
         let data_type: String = row.get(2)?;
         let notnull: bool = row.get(3)?;
         let dflt_value: Option<String> = row.get(4)?;
+        let pk: i32 = row.get(5)?;
 
-        Ok(Column {
-            name,
-            data_type: normalize_type(&data_type),
-            is_nullable: !notnull,
-            default: dflt_value.map(|d| normalize_default(&d)),
-        })
+        Ok((
+            Column {
+                name,
+                data_type: normalize_type(&data_type),
+                is_nullable: !notnull,
+                default: dflt_value.map(|d| normalize_default(&d)),
+            },
+            pk,
+        ))
     })?;
 
-    for col in columns {
-        let col = col?;
+    for result in columns {
+        let (col, pk) = result?;
+        if pk > 0 {
+            pk_columns.push((pk, col.name.clone()));
+        }
         table.columns.insert(col.name.clone(), col);
+    }
+
+    // Build PK constraint from columns with pk > 0
+    if !pk_columns.is_empty() {
+        pk_columns.sort_by_key(|(pk_ord, _)| *pk_ord);
+        let cols: Vec<String> = pk_columns.into_iter().map(|(_, name)| name).collect();
+        let pk_name = format!("{}_pkey", table_name);
+        table.constraints.insert(
+            pk_name.clone(),
+            Constraint {
+                name: pk_name,
+                table_name: table_name.to_string(),
+                kind: ConstraintKind::PrimaryKey { columns: cols },
+            },
+        );
     }
 
     Ok(())
@@ -116,7 +140,9 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
         ))?;
         let columns: Vec<String> = col_stmt
             .query_map([], |row| row.get::<_, Option<String>>(2))?
-            .filter_map(|r| r.ok().flatten())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect();
 
         if columns.is_empty() {
@@ -161,8 +187,7 @@ fn load_foreign_keys(
                 row.get::<_, String>(6)?,         // on_delete
             ))
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Group by FK id: (ref_table, columns, ref_columns, on_update, on_delete)
     type FkGroup = (String, Vec<String>, Vec<String>, String, String);
@@ -224,8 +249,7 @@ fn load_views(conn: &Connection, schema: &mut Schema) -> Result<(), DbDiffError>
 
     let views: Vec<(String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let view_as_re = regex::Regex::new(r"(?i)\bAS\s+").unwrap();
     for (name, sql) in views {

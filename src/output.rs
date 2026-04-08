@@ -46,6 +46,18 @@ pub fn print_diff(diff: &SchemaDiff) {
         println!();
     }
 
+    // Renamed tables
+    for rename in &diff.renamed_tables {
+        println!(
+            "{}",
+            format!(
+                "↳ table: {} → {} (rename, {} confidence)",
+                rename.old_name, rename.new_name, rename.confidence
+            )
+            .yellow()
+        );
+    }
+
     // Modified tables
     for table_diff in &diff.modified_tables {
         println!("{}", format!("~ table: {}", table_diff.table_name).yellow());
@@ -112,6 +124,17 @@ pub fn print_diff(diff: &SchemaDiff) {
 }
 
 fn print_table_diff(diff: &TableDiff) {
+    for rename in &diff.renamed_columns {
+        println!(
+            "{}",
+            format!(
+                "  ↳ column  {} → {} (rename, {} confidence)",
+                rename.old.name, rename.new.name, rename.confidence
+            )
+            .yellow()
+        );
+    }
+
     for col in &diff.added_columns {
         println!(
             "{}",
@@ -302,8 +325,13 @@ pub fn print_migration_explained(statements: &[MigrationStatement]) {
 }
 
 /// Format migration statements as plain SQL (no colors).
-pub fn migration_to_sql(statements: &[MigrationStatement]) -> String {
+pub fn migration_to_sql(statements: &[MigrationStatement], wrap_transaction: bool) -> String {
     let mut lines = Vec::new();
+
+    if wrap_transaction {
+        lines.push("BEGIN;".to_string());
+        lines.push(String::new());
+    }
 
     for stmt in statements {
         for warning in &stmt.warnings {
@@ -311,6 +339,10 @@ pub fn migration_to_sql(statements: &[MigrationStatement]) -> String {
         }
         lines.push(stmt.sql.clone());
         lines.push(String::new());
+    }
+
+    if wrap_transaction {
+        lines.push("COMMIT;".to_string());
     }
 
     lines.join("\n")
@@ -321,10 +353,12 @@ pub fn migration_to_sql(statements: &[MigrationStatement]) -> String {
 pub struct DiffSummary {
     pub tables_added: usize,
     pub tables_removed: usize,
+    pub tables_renamed: usize,
     pub tables_modified: usize,
     pub tables_unchanged: usize,
     pub columns_added: usize,
     pub columns_removed: usize,
+    pub columns_renamed: usize,
     pub columns_modified: usize,
     pub indexes_added: usize,
     pub indexes_removed: usize,
@@ -414,13 +448,21 @@ pub fn diff_summary(diff: &SchemaDiff) -> DiffSummary {
             .map(|t| t.constraints.len())
             .sum::<usize>();
 
+    let columns_renamed: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.renamed_columns.len())
+        .sum();
+
     DiffSummary {
         tables_added: diff.added_tables.len(),
         tables_removed: diff.removed_tables.len(),
+        tables_renamed: diff.renamed_tables.len(),
         tables_modified: diff.modified_tables.len(),
         tables_unchanged: diff.unchanged_tables.len(),
         columns_added,
         columns_removed,
+        columns_renamed,
         columns_modified,
         indexes_added,
         indexes_removed,
@@ -453,6 +495,9 @@ pub fn print_summary(diff: &SchemaDiff) {
     if s.tables_removed > 0 {
         parts.push(format!("{} table(s) removed", s.tables_removed));
     }
+    if s.tables_renamed > 0 {
+        parts.push(format!("{} table(s) renamed", s.tables_renamed));
+    }
     if s.tables_modified > 0 {
         parts.push(format!("{} table(s) modified", s.tables_modified));
     }
@@ -463,6 +508,9 @@ pub fn print_summary(diff: &SchemaDiff) {
     }
     if s.columns_removed > 0 {
         detail_parts.push(format!("{} columns removed", s.columns_removed));
+    }
+    if s.columns_renamed > 0 {
+        detail_parts.push(format!("{} columns renamed", s.columns_renamed));
     }
     if s.columns_modified > 0 {
         detail_parts.push(format!("{} columns altered", s.columns_modified));
@@ -505,4 +553,44 @@ pub fn print_summary(diff: &SchemaDiff) {
     }
 
     println!("{}", summary.bold());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_to_sql_with_transaction() {
+        let stmts = vec![MigrationStatement {
+            sql: "ALTER TABLE users ADD COLUMN email text;".into(),
+            warnings: Vec::new(),
+            is_blocking: false,
+        }];
+
+        let sql = migration_to_sql(&stmts, true);
+        assert!(sql.starts_with("BEGIN;"), "Expected BEGIN at start: {sql}");
+        assert!(sql.contains("ALTER TABLE users ADD COLUMN email text;"));
+        assert!(sql.trim_end().ends_with("COMMIT;"), "Expected COMMIT at end: {sql}");
+    }
+
+    #[test]
+    fn migration_to_sql_without_transaction() {
+        let stmts = vec![MigrationStatement {
+            sql: "ALTER TABLE users ADD COLUMN email text;".into(),
+            warnings: Vec::new(),
+            is_blocking: false,
+        }];
+
+        let sql = migration_to_sql(&stmts, false);
+        assert!(!sql.contains("BEGIN;"));
+        assert!(!sql.contains("COMMIT;"));
+        assert!(sql.contains("ALTER TABLE users ADD COLUMN email text;"));
+    }
+
+    #[test]
+    fn migration_to_sql_empty_with_transaction() {
+        let sql = migration_to_sql(&[], true);
+        assert!(sql.contains("BEGIN;"));
+        assert!(sql.contains("COMMIT;"));
+    }
 }

@@ -78,6 +78,18 @@ pub struct Cli {
     /// Show explanation for each migration statement
     #[arg(long)]
     pub explain: bool,
+
+    /// Disable transaction wrapping (BEGIN/COMMIT) around migration SQL
+    #[arg(long)]
+    pub no_transaction: bool,
+
+    /// Use CREATE INDEX CONCURRENTLY for non-blocking index creation (PostgreSQL only, implies --no-transaction)
+    #[arg(long)]
+    pub concurrently: bool,
+
+    /// Detect column/table renames instead of DROP+ADD (experimental)
+    #[arg(long)]
+    pub detect_renames: bool,
 }
 
 /// Color output mode.
@@ -202,6 +214,18 @@ pub struct DiffArgs {
     /// Show explanation for each migration statement
     #[arg(long)]
     pub explain: bool,
+
+    /// Disable transaction wrapping (BEGIN/COMMIT) around migration SQL
+    #[arg(long)]
+    pub no_transaction: bool,
+
+    /// Use CREATE INDEX CONCURRENTLY for non-blocking index creation (PostgreSQL only, implies --no-transaction)
+    #[arg(long)]
+    pub concurrently: bool,
+
+    /// Detect column/table renames instead of DROP+ADD (experimental)
+    #[arg(long)]
+    pub detect_renames: bool,
 }
 
 /// Migration direction for output.
@@ -279,6 +303,9 @@ pub struct DiffParams {
     pub color: ColorMode,
     pub explain: bool,
     pub fail_on_blocking: bool,
+    pub transaction: bool,
+    pub concurrently: bool,
+    pub detect_renames: bool,
 }
 
 impl Cli {
@@ -307,6 +334,7 @@ impl Cli {
                 } else {
                     false
                 };
+                let transaction = !self.no_transaction && !self.concurrently;
                 ResolvedCommand::Diff(DiffParams {
                     source,
                     target_source,
@@ -321,6 +349,9 @@ impl Cli {
                     color: self.color,
                     explain: self.explain,
                     fail_on_blocking: self.fail_on_blocking,
+                    transaction,
+                    concurrently: self.concurrently,
+                    detect_renames: self.detect_renames,
                 })
             }
         }
@@ -348,6 +379,7 @@ impl DiffArgs {
             false
         };
 
+        let transaction = !self.no_transaction && !self.concurrently;
         DiffParams {
             source: self.source,
             target_source,
@@ -362,6 +394,9 @@ impl DiffArgs {
             color: self.color,
             explain: self.explain,
             fail_on_blocking: self.fail_on_blocking,
+            transaction,
+            concurrently: self.concurrently,
+            detect_renames: self.detect_renames,
         }
     }
 }

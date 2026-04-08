@@ -77,7 +77,7 @@ impl Index {
     }
 }
 
-/// A table constraint (FK, unique, check).
+/// A table constraint (PK, FK, unique, check).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Constraint {
     pub name: String,
@@ -87,6 +87,9 @@ pub struct Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum ConstraintKind {
+    PrimaryKey {
+        columns: Vec<String>,
+    },
     ForeignKey {
         columns: Vec<String>,
         ref_table: String,
@@ -105,6 +108,9 @@ pub enum ConstraintKind {
 impl Constraint {
     pub fn definition(&self) -> String {
         match &self.kind {
+            ConstraintKind::PrimaryKey { columns } => {
+                format!("PRIMARY KEY ({})", columns.join(", "))
+            }
             ConstraintKind::ForeignKey {
                 columns,
                 ref_table,
@@ -151,25 +157,6 @@ pub struct Sequence {
     pub increment: i64,
     pub min_value: i64,
     pub max_value: i64,
-}
-
-/// A database trigger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Trigger {
-    pub name: String,
-    pub table_name: String,
-    pub timing: String,
-    pub event: String,
-    pub body: String,
-}
-
-/// A stored function or procedure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Function {
-    pub name: String,
-    pub language: String,
-    pub return_type: String,
-    pub body: String,
 }
 
 /// Deserializable schema for snapshot import.

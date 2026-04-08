@@ -96,45 +96,94 @@ impl CiReport {
             });
         }
 
+        // Renamed tables
+        for rename in &diff.renamed_tables {
+            let stmt = statements.iter().find(|s| {
+                s.sql.contains("RENAME") && s.sql.contains(&rename.old_name)
+            });
+            changes.push(CiChange {
+                change_type: "RENAME".to_string(),
+                object: "TABLE".to_string(),
+                table: rename.old_name.clone(),
+                name: rename.new_name.clone(),
+                description: format!(
+                    "RENAME TABLE {} → {}",
+                    rename.old_name, rename.new_name
+                ),
+                is_blocking: false,
+                sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+            });
+        }
+
         // Modified tables
         for table_diff in &diff.modified_tables {
             let tname = &table_diff.table_name;
 
-            for col in &table_diff.added_columns {
+            for rename in &table_diff.renamed_columns {
                 let stmt = statements.iter().find(|s| {
-                    s.sql.contains("ADD COLUMN")
+                    s.sql.contains("RENAME COLUMN")
+                        && s.sql.contains(&rename.old.name)
+                        && s.sql.contains(tname.as_str())
+                });
+                changes.push(CiChange {
+                    change_type: "RENAME".to_string(),
+                    object: "COLUMN".to_string(),
+                    table: tname.clone(),
+                    name: format!("{} → {}", rename.old.name, rename.new.name),
+                    description: format!(
+                        "RENAME COLUMN {} → {} ({} confidence)",
+                        rename.old.name, rename.new.name, rename.confidence
+                    ),
+                    is_blocking: false,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+                });
+            }
+
+            for col in &table_diff.added_columns {
+                // In reverse mode, added columns are DROP'd (rollback of ADD)
+                let (sql_kw, label, default_blocking) = if reverse {
+                    ("DROP COLUMN", "DROP", true)
+                } else {
+                    ("ADD COLUMN", "ADD", false)
+                };
+                let stmt = statements.iter().find(|s| {
+                    s.sql.contains(sql_kw)
                         && s.sql.contains(&col.name)
                         && s.sql.contains(tname.as_str())
                 });
-                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(false);
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(default_blocking);
                 changes.push(CiChange {
-                    change_type: "ADD".to_string(),
+                    change_type: label.to_string(),
                     object: "COLUMN".to_string(),
                     table: tname.clone(),
                     name: col.name.clone(),
-                    description: format!("ADD COLUMN {}", col.definition()),
+                    description: format!("{label} COLUMN {}", col.definition()),
                     is_blocking: blocking,
                     sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
 
             for col in &table_diff.removed_columns {
+                // In reverse mode, removed columns are ADD'd back (rollback of DROP)
+                let (sql_kw, label, default_blocking) = if reverse {
+                    ("ADD COLUMN", "ADD", false)
+                } else {
+                    ("DROP COLUMN", "DROP", true)
+                };
+                let stmt = statements.iter().find(|s| {
+                    s.sql.contains(sql_kw)
+                        && s.sql.contains(&col.name)
+                        && s.sql.contains(tname.as_str())
+                });
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(default_blocking);
                 changes.push(CiChange {
-                    change_type: "DROP".to_string(),
+                    change_type: label.to_string(),
                     object: "COLUMN".to_string(),
                     table: tname.clone(),
                     name: col.name.clone(),
-                    description: format!("DROP COLUMN {}", col.name),
-                    is_blocking: false,
-                    sql: statements
-                        .iter()
-                        .find(|s| {
-                            s.sql.contains("DROP COLUMN")
-                                && s.sql.contains(&col.name)
-                                && s.sql.contains(tname.as_str())
-                        })
-                        .map(|s| s.sql.clone())
-                        .unwrap_or_default(),
+                    description: format!("{label} COLUMN {}", col.name),
+                    is_blocking: blocking,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
 
@@ -164,62 +213,59 @@ impl CiReport {
             }
 
             for idx in &table_diff.added_indexes {
+                // In reverse mode, added indexes are DROP'd
+                let (sql_kw, label, default_blocking) = if reverse {
+                    ("DROP INDEX", "DROP", true)
+                } else {
+                    ("CREATE", "ADD", true)
+                };
                 let stmt = statements
                     .iter()
-                    .find(|s| s.sql.contains("CREATE") && s.sql.contains(&idx.name));
-                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(true);
+                    .find(|s| s.sql.contains(sql_kw) && s.sql.contains(&idx.name));
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(default_blocking);
                 changes.push(CiChange {
-                    change_type: "ADD".to_string(),
+                    change_type: label.to_string(),
                     object: "INDEX".to_string(),
                     table: tname.clone(),
                     name: idx.name.clone(),
-                    description: format!("ADD INDEX {}", idx.definition()),
+                    description: format!("{label} INDEX {}", idx.definition()),
                     is_blocking: blocking,
                     sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
 
             for idx in &table_diff.removed_indexes {
+                // In reverse mode, removed indexes are re-CREATE'd
+                let (sql_kw, label, default_blocking) = if reverse {
+                    ("CREATE", "ADD", true)
+                } else {
+                    ("DROP INDEX", "DROP", true)
+                };
+                let stmt = statements
+                    .iter()
+                    .find(|s| s.sql.contains(sql_kw) && s.sql.contains(&idx.name));
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(default_blocking);
                 changes.push(CiChange {
-                    change_type: "DROP".to_string(),
+                    change_type: label.to_string(),
                     object: "INDEX".to_string(),
                     table: tname.clone(),
                     name: idx.name.clone(),
-                    description: format!("DROP INDEX {}", idx.name),
-                    is_blocking: true,
-                    sql: statements
-                        .iter()
-                        .find(|s| s.sql.contains("DROP INDEX") && s.sql.contains(&idx.name))
-                        .map(|s| s.sql.clone())
-                        .unwrap_or_default(),
+                    description: format!("{label} INDEX {}", idx.name),
+                    is_blocking: blocking,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
 
             // Constraints
             for c in &table_diff.added_constraints {
-                let stmt = statements
-                    .iter()
-                    .find(|s| s.sql.contains("ADD CONSTRAINT") && s.sql.contains(&c.name));
-                changes.push(CiChange {
-                    change_type: "ADD".to_string(),
-                    object: "CONSTRAINT".to_string(),
-                    table: tname.clone(),
-                    name: c.name.clone(),
-                    description: format!("ADD CONSTRAINT {} {}", c.name, c.definition()),
-                    is_blocking: stmt.map(|s| s.is_blocking).unwrap_or(true),
-                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
-                });
-            }
-
-            for c in &table_diff.removed_constraints {
-                changes.push(CiChange {
-                    change_type: "DROP".to_string(),
-                    object: "CONSTRAINT".to_string(),
-                    table: tname.clone(),
-                    name: c.name.clone(),
-                    description: format!("DROP CONSTRAINT {}", c.name),
-                    is_blocking: true,
-                    sql: statements
+                // In reverse mode, added constraints are DROP'd
+                let (label, default_blocking) = if reverse {
+                    ("DROP", true)
+                } else {
+                    ("ADD", true)
+                };
+                let stmt = if reverse {
+                    statements
                         .iter()
                         .find(|s| s.sql.contains("DROP CONSTRAINT") && s.sql.contains(&c.name))
                         .or_else(|| {
@@ -227,8 +273,52 @@ impl CiReport {
                                 s.sql.contains("DROP FOREIGN KEY") && s.sql.contains(&c.name)
                             })
                         })
-                        .map(|s| s.sql.clone())
-                        .unwrap_or_default(),
+                } else {
+                    statements
+                        .iter()
+                        .find(|s| s.sql.contains("ADD CONSTRAINT") && s.sql.contains(&c.name))
+                };
+                changes.push(CiChange {
+                    change_type: label.to_string(),
+                    object: "CONSTRAINT".to_string(),
+                    table: tname.clone(),
+                    name: c.name.clone(),
+                    description: format!("{label} CONSTRAINT {} {}", c.name, c.definition()),
+                    is_blocking: stmt.map(|s| s.is_blocking).unwrap_or(default_blocking),
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
+                });
+            }
+
+            for c in &table_diff.removed_constraints {
+                // In reverse mode, removed constraints are ADD'd back
+                let (label, default_blocking) = if reverse {
+                    ("ADD", true)
+                } else {
+                    ("DROP", true)
+                };
+                let stmt = if reverse {
+                    statements
+                        .iter()
+                        .find(|s| s.sql.contains("ADD CONSTRAINT") && s.sql.contains(&c.name))
+                } else {
+                    statements
+                        .iter()
+                        .find(|s| s.sql.contains("DROP CONSTRAINT") && s.sql.contains(&c.name))
+                        .or_else(|| {
+                            statements.iter().find(|s| {
+                                s.sql.contains("DROP FOREIGN KEY") && s.sql.contains(&c.name)
+                            })
+                        })
+                };
+                let blocking = stmt.map(|s| s.is_blocking).unwrap_or(default_blocking);
+                changes.push(CiChange {
+                    change_type: label.to_string(),
+                    object: "CONSTRAINT".to_string(),
+                    table: tname.clone(),
+                    name: c.name.clone(),
+                    description: format!("{label} CONSTRAINT {}", c.name),
+                    is_blocking: blocking,
+                    sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
                 });
             }
         }
@@ -236,22 +326,22 @@ impl CiReport {
         // Views
         for view in &diff.added_views {
             changes.push(CiChange {
-                change_type: "ADD".to_string(),
+                change_type: add_label.to_string(),
                 object: "VIEW".to_string(),
                 table: String::new(),
                 name: view.name.clone(),
-                description: format!("ADD VIEW {}", view.name),
+                description: format!("{add_label} VIEW {}", view.name),
                 is_blocking: false,
                 sql: String::new(),
             });
         }
         for view in &diff.removed_views {
             changes.push(CiChange {
-                change_type: "DROP".to_string(),
+                change_type: drop_label.to_string(),
                 object: "VIEW".to_string(),
                 table: String::new(),
                 name: view.name.clone(),
-                description: format!("DROP VIEW {}", view.name),
+                description: format!("{drop_label} VIEW {}", view.name),
                 is_blocking: false,
                 sql: String::new(),
             });
@@ -271,22 +361,22 @@ impl CiReport {
         // Enums
         for e in &diff.added_enums {
             changes.push(CiChange {
-                change_type: "ADD".to_string(),
+                change_type: add_label.to_string(),
                 object: "ENUM".to_string(),
                 table: String::new(),
                 name: e.name.clone(),
-                description: format!("ADD ENUM {}", e.name),
+                description: format!("{add_label} ENUM {}", e.name),
                 is_blocking: false,
                 sql: String::new(),
             });
         }
         for e in &diff.removed_enums {
             changes.push(CiChange {
-                change_type: "DROP".to_string(),
+                change_type: drop_label.to_string(),
                 object: "ENUM".to_string(),
                 table: String::new(),
                 name: e.name.clone(),
-                description: format!("DROP ENUM {}", e.name),
+                description: format!("{drop_label} ENUM {}", e.name),
                 is_blocking: false,
                 sql: String::new(),
             });
@@ -306,22 +396,22 @@ impl CiReport {
         // Sequences
         for s in &diff.added_sequences {
             changes.push(CiChange {
-                change_type: "ADD".to_string(),
+                change_type: add_label.to_string(),
                 object: "SEQUENCE".to_string(),
                 table: String::new(),
                 name: s.name.clone(),
-                description: format!("ADD SEQUENCE {}", s.name),
+                description: format!("{add_label} SEQUENCE {}", s.name),
                 is_blocking: false,
                 sql: String::new(),
             });
         }
         for s in &diff.removed_sequences {
             changes.push(CiChange {
-                change_type: "DROP".to_string(),
+                change_type: drop_label.to_string(),
                 object: "SEQUENCE".to_string(),
                 table: String::new(),
                 name: s.name.clone(),
-                description: format!("DROP SEQUENCE {}", s.name),
+                description: format!("{drop_label} SEQUENCE {}", s.name),
                 is_blocking: false,
                 sql: String::new(),
             });
@@ -397,7 +487,7 @@ mod tests {
     fn exit_ok_for_identical_schemas() {
         let schema = Schema::new();
         let diff = diff_schemas(&schema, &schema);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(report.equal);
@@ -424,7 +514,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(!report.equal);
@@ -452,7 +542,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(!report.equal);
@@ -470,7 +560,7 @@ mod tests {
         right.tables.insert("x".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         assert!(report.summary.contains("1 change(s) detected"));
@@ -485,7 +575,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         let json = serde_json::to_string_pretty(&report).unwrap();
@@ -503,7 +593,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         let report = CiReport::from_diff(&diff, &stmts);
 
         let yaml = serde_yaml::to_string(&report).unwrap();

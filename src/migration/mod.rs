@@ -1,8 +1,21 @@
+mod sql;
+
 use serde::Serialize;
 
-use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
+use crate::diff::SchemaDiff;
 use crate::loader::SqlDialect;
-use crate::model::{Column, Constraint, ConstraintKind, Index, Table};
+
+use sql::*;
+
+/// A single migration SQL statement with optional safety warnings.
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationStatement {
+    pub sql: String,
+    pub warnings: Vec<String>,
+    /// Whether this statement acquires heavy locks (e.g. AccessExclusiveLock)
+    /// or performs a full table rewrite.
+    pub is_blocking: bool,
+}
 
 /// Generate migration SQL statements from a schema diff.
 ///
@@ -20,8 +33,51 @@ use crate::model::{Column, Constraint, ConstraintKind, Index, Table};
 /// 11. CREATE INDEXes
 /// 12. ADD CONSTRAINTs for modified tables
 /// 13. CREATE new VIEWs
-pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
+pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect, concurrently: bool) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
+
+    // Phase 0: RENAME TABLEs (before any DROP/CREATE operations)
+    for rename in &diff.renamed_tables {
+        let raw_sql = rename_table_sql(&rename.old_name, &rename.new_name, dialect);
+        let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
+        statements.push(MigrationStatement {
+            sql: if is_medium {
+                format!("-- {raw_sql}  -- uncomment after manual verification")
+            } else {
+                raw_sql
+            },
+            warnings: vec![format!(
+                "Detected table rename: '{}' → '{}' ({} confidence). Verify this is correct.",
+                rename.old_name, rename.new_name, rename.confidence
+            )],
+            is_blocking: false,
+        });
+    }
+
+    // Phase 0.5: RENAME COLUMNs (before DROP, to preserve data)
+    for table_diff in &diff.modified_tables {
+        for rename in &table_diff.renamed_columns {
+            let raw_sql = rename_column_sql(
+                &table_diff.table_name,
+                &rename.old.name,
+                &rename.new.name,
+                dialect,
+            );
+            let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
+            statements.push(MigrationStatement {
+                sql: if is_medium {
+                    format!("-- {raw_sql}  -- uncomment after manual verification")
+                } else {
+                    raw_sql
+                },
+                warnings: vec![format!(
+                    "Detected column rename: '{}' → '{}' ({} confidence). Verify this is correct.",
+                    rename.old.name, rename.new.name, rename.confidence
+                )],
+                is_blocking: false,
+            });
+        }
+    }
 
     // Phase 1: DROP CONSTRAINTs from modified tables
     for table_diff in &diff.modified_tables {
@@ -218,7 +274,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 
         for idx in table.indexes.values() {
             statements.push(MigrationStatement {
-                sql: create_index_sql(idx, dialect),
+                sql: create_index_sql(idx, dialect, false), // New table — CONCURRENTLY not needed
                 warnings: Vec::new(),
                 is_blocking: false, // Index on brand-new table is non-blocking
             });
@@ -263,13 +319,18 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
     // Phase 11: CREATE INDEXes on modified tables
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.added_indexes {
-            statements.push(MigrationStatement {
-                sql: create_index_sql(idx, dialect),
-                warnings: vec![
+            let warnings = if concurrently {
+                Vec::new()
+            } else {
+                vec![
                     "Consider using CREATE INDEX CONCURRENTLY to avoid locking the table."
                         .to_string(),
-                ],
-                is_blocking: true, // CREATE INDEX (without CONCURRENTLY) blocks writes
+                ]
+            };
+            statements.push(MigrationStatement {
+                sql: create_index_sql(idx, dialect, concurrently),
+                warnings,
+                is_blocking: !concurrently, // CONCURRENTLY is non-blocking
             });
         }
     }
@@ -320,7 +381,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
 /// recreate removed enums/sequences -> recreate removed tables ->
 /// re-add removed columns -> recreate removed constraints/indexes ->
 /// recreate removed views
-pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<MigrationStatement> {
+pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect, _concurrently: bool) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
     // 1. Drop views that were added
@@ -486,7 +547,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
         for idx in table.indexes.values() {
             statements.push(MigrationStatement {
-                sql: create_index_sql(idx, dialect),
+                sql: create_index_sql(idx, dialect, false),
                 warnings: Vec::new(),
                 is_blocking: false,
             });
@@ -526,6 +587,43 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         statements.append(&mut revert_stmts);
     }
 
+    // 16c. Reverse column renames (before re-adding constraints that reference old names)
+    for table_diff in &diff.modified_tables {
+        for rename in &table_diff.renamed_columns {
+            let raw_sql = rename_column_sql(
+                &table_diff.table_name,
+                &rename.new.name,
+                &rename.old.name,
+                dialect,
+            );
+            let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
+            statements.push(MigrationStatement {
+                sql: if is_medium {
+                    format!("-- {raw_sql}  -- uncomment after manual verification")
+                } else {
+                    raw_sql
+                },
+                warnings: Vec::new(),
+                is_blocking: false,
+            });
+        }
+    }
+
+    // 16d. Reverse table renames (before re-adding constraints that reference old table names)
+    for rename in &diff.renamed_tables {
+        let raw_sql = rename_table_sql(&rename.new_name, &rename.old_name, dialect);
+        let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
+        statements.push(MigrationStatement {
+            sql: if is_medium {
+                format!("-- {raw_sql}  -- uncomment after manual verification")
+            } else {
+                raw_sql
+            },
+            warnings: Vec::new(),
+            is_blocking: false,
+        });
+    }
+
     // 17. Re-add removed constraints
     for table_diff in &diff.modified_tables {
         for c in &table_diff.removed_constraints {
@@ -537,18 +635,18 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         }
     }
 
-    // 16. Recreate removed indexes
+    // 18. Recreate removed indexes
     for table_diff in &diff.modified_tables {
         for idx in &table_diff.removed_indexes {
             statements.push(MigrationStatement {
-                sql: create_index_sql(idx, dialect),
+                sql: create_index_sql(idx, dialect, false),
                 warnings: Vec::new(),
                 is_blocking: true,
             });
         }
     }
 
-    // 17. Revert modified views (after columns are restored)
+    // 19. Revert modified views (after columns are restored)
     for vd in &diff.modified_views {
         statements.push(MigrationStatement {
             sql: format!(
@@ -561,7 +659,7 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
         });
     }
 
-    // 18. Recreate removed views (after tables are back)
+    // 20. Recreate removed views (after tables are back)
     for view in &diff.removed_views {
         statements.push(MigrationStatement {
             sql: format!(
@@ -575,388 +673,6 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migratio
     }
 
     statements
-}
-
-/// A single migration SQL statement with optional safety warnings.
-#[derive(Debug, Clone, Serialize)]
-pub struct MigrationStatement {
-    pub sql: String,
-    pub warnings: Vec<String>,
-    /// Whether this statement acquires heavy locks (e.g. AccessExclusiveLock)
-    /// or performs a full table rewrite.
-    pub is_blocking: bool,
-}
-
-fn quote_ident(name: &str, dialect: SqlDialect) -> String {
-    let needs_quoting = name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if needs_quoting {
-        match dialect {
-            SqlDialect::MySql => format!("`{}`", name.replace('`', "``")),
-            _ => format!("\"{}\"", name.replace('"', "\"\"")),
-        }
-    } else {
-        name.to_string()
-    }
-}
-
-fn column_definition_sql(col: &Column, dialect: SqlDialect) -> String {
-    let mut def = format!("{} {}", quote_ident(&col.name, dialect), col.data_type);
-    if !col.is_nullable {
-        def.push_str(" NOT NULL");
-    }
-    if let Some(ref default) = col.default {
-        def.push_str(&format!(" DEFAULT {default}"));
-    }
-    def
-}
-
-fn create_table_sql(table: &Table, dialect: SqlDialect) -> String {
-    let columns: Vec<String> = table
-        .columns
-        .values()
-        .map(|c| format!("    {}", column_definition_sql(c, dialect)))
-        .collect();
-    format!(
-        "CREATE TABLE {} (\n{}\n);",
-        quote_ident(&table.name, dialect),
-        columns.join(",\n")
-    )
-}
-
-fn create_index_sql(idx: &Index, dialect: SqlDialect) -> String {
-    let unique = if idx.is_unique { "UNIQUE " } else { "" };
-    // PostgreSQL index columns are raw SQL clauses from pg_get_indexdef() and may
-    // contain expressions (lower(email)), sort orders (created_at DESC), or
-    // already-quoted identifiers — they must NOT be wrapped with quote_ident.
-    // MySQL/SQLite index columns are plain identifier names from information_schema
-    // and need proper quoting.
-    let cols = match dialect {
-        SqlDialect::Postgres | SqlDialect::SqlFile | SqlDialect::Snapshot => idx.columns.join(", "),
-        _ => idx
-            .columns
-            .iter()
-            .map(|c| quote_ident(c, dialect))
-            .collect::<Vec<_>>()
-            .join(", "),
-    };
-    format!(
-        "CREATE {unique}INDEX {} ON {}({});",
-        quote_ident(&idx.name, dialect),
-        quote_ident(&idx.table_name, dialect),
-        cols
-    )
-}
-
-fn drop_index_sql(idx: &Index, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::MySql => format!(
-            "DROP INDEX {} ON {};",
-            quote_ident(&idx.name, dialect),
-            quote_ident(&idx.table_name, dialect)
-        ),
-        _ => format!("DROP INDEX {};", quote_ident(&idx.name, dialect)),
-    }
-}
-
-fn add_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
-    // SQLite does not support ALTER TABLE ADD CONSTRAINT
-    if dialect == SqlDialect::Sqlite {
-        return format!(
-            "-- manual migration required: add constraint {} on {}.{} \
-             (SQLite does not support ALTER TABLE ADD CONSTRAINT; recreate the table)",
-            c.name,
-            c.table_name,
-            c.definition()
-        );
-    }
-    let table = quote_ident(&c.table_name, dialect);
-    let name = quote_ident(&c.name, dialect);
-    match &c.kind {
-        ConstraintKind::ForeignKey {
-            columns,
-            ref_table,
-            ref_columns,
-            on_delete,
-            on_update,
-        } => {
-            let cols: Vec<String> = columns.iter().map(|c| quote_ident(c, dialect)).collect();
-            let refs: Vec<String> = ref_columns
-                .iter()
-                .map(|c| quote_ident(c, dialect))
-                .collect();
-            let mut sql = format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {name} FOREIGN KEY ({}) REFERENCES {}({})",
-                cols.join(", "),
-                quote_ident(ref_table, dialect),
-                refs.join(", ")
-            );
-            if let Some(action) = on_delete {
-                sql.push_str(&format!(" ON DELETE {action}"));
-            }
-            if let Some(action) = on_update {
-                sql.push_str(&format!(" ON UPDATE {action}"));
-            }
-            sql.push(';');
-            sql
-        }
-        ConstraintKind::Unique { columns } => {
-            let cols: Vec<String> = columns.iter().map(|c| quote_ident(c, dialect)).collect();
-            format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {name} UNIQUE ({});",
-                cols.join(", ")
-            )
-        }
-        ConstraintKind::Check { expression } => {
-            format!("ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({expression});")
-        }
-    }
-}
-
-fn drop_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::MySql => {
-            // MySQL uses DROP FOREIGN KEY for FKs, DROP INDEX for unique constraints
-            match &c.kind {
-                ConstraintKind::ForeignKey { .. } => format!(
-                    "ALTER TABLE {} DROP FOREIGN KEY {};",
-                    quote_ident(&c.table_name, dialect),
-                    quote_ident(&c.name, dialect)
-                ),
-                ConstraintKind::Unique { .. } => format!(
-                    "ALTER TABLE {} DROP INDEX {};",
-                    quote_ident(&c.table_name, dialect),
-                    quote_ident(&c.name, dialect)
-                ),
-                ConstraintKind::Check { .. } => format!(
-                    "ALTER TABLE {} DROP CHECK {};",
-                    quote_ident(&c.table_name, dialect),
-                    quote_ident(&c.name, dialect)
-                ),
-            }
-        }
-        SqlDialect::Sqlite => format!(
-            "-- manual migration required: drop constraint {} on {} \
-             (SQLite does not support ALTER TABLE DROP CONSTRAINT; recreate the table)",
-            c.name, c.table_name
-        ),
-        _ => format!(
-            "ALTER TABLE {} DROP CONSTRAINT {};",
-            quote_ident(&c.table_name, dialect),
-            quote_ident(&c.name, dialect)
-        ),
-    }
-}
-
-fn add_column_warnings(col: &Column) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if !col.is_nullable && col.default.is_none() {
-        warnings.push(format!(
-            "Adding NOT NULL column '{}' without DEFAULT will fail on non-empty tables. \
-             Consider: ADD COLUMN ... DEFAULT NULL first, then backfill, then SET NOT NULL.",
-            col.name
-        ));
-    }
-    if !col.is_nullable && col.default.is_some() {
-        warnings.push(format!(
-            "On PostgreSQL < 11, adding NOT NULL column '{}' with DEFAULT will rewrite the \
-             entire table and acquire AccessExclusiveLock.",
-            col.name
-        ));
-    }
-    warnings
-}
-
-/// Generate ALTER statements to revert modified columns to their old definitions (for rollback).
-fn generate_column_alterations_reversed(
-    table_diff: &TableDiff,
-    dialect: SqlDialect,
-) -> Vec<MigrationStatement> {
-    // Swap old<->new in each ColumnDiff, then reuse the forward logic
-    let reversed = crate::diff::TableDiff {
-        table_name: table_diff.table_name.clone(),
-        added_columns: Vec::new(),
-        removed_columns: Vec::new(),
-        modified_columns: table_diff
-            .modified_columns
-            .iter()
-            .map(|cd| crate::diff::ColumnDiff {
-                old: cd.new.clone(),
-                new: cd.old.clone(),
-            })
-            .collect(),
-        unchanged_columns: Vec::new(),
-        added_indexes: Vec::new(),
-        removed_indexes: Vec::new(),
-        added_constraints: Vec::new(),
-        removed_constraints: Vec::new(),
-    };
-    generate_column_alterations(&reversed, dialect)
-}
-
-fn generate_column_alterations(
-    table_diff: &TableDiff,
-    dialect: SqlDialect,
-) -> Vec<MigrationStatement> {
-    let mut stmts = Vec::new();
-
-    for col_diff in &table_diff.modified_columns {
-        let ColumnDiff { old, new } = col_diff;
-        let table = &table_diff.table_name;
-
-        // Type change — blocking: requires table rewrite / AccessExclusiveLock
-        if old.data_type != new.data_type {
-            match dialect {
-                SqlDialect::MySql => stmts.push(MigrationStatement {
-                    sql: format!(
-                        "ALTER TABLE {} MODIFY COLUMN {};",
-                        quote_ident(table, dialect),
-                        column_definition_sql(new, dialect)
-                    ),
-                    warnings: vec![format!(
-                        "Changing column type from '{}' to '{}' may require a table rewrite \
-                         and table lock.",
-                        old.data_type, new.data_type
-                    )],
-                    is_blocking: true,
-                }),
-                SqlDialect::Sqlite => stmts.push(MigrationStatement {
-                    sql: format!(
-                        "-- manual migration required for type change on {}.{}",
-                        quote_ident(table, dialect),
-                        quote_ident(&new.name, dialect)
-                    ),
-                    warnings: vec![format!(
-                        "SQLite does not support ALTER COLUMN TYPE directly for '{}'. \
-                         Recreate table '{table}' with the desired column definition.",
-                        new.name
-                    )],
-                    is_blocking: true,
-                }),
-                _ => stmts.push(MigrationStatement {
-                    sql: format!(
-                        "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
-                        quote_ident(table, dialect),
-                        quote_ident(&new.name, dialect),
-                        new.data_type
-                    ),
-                    warnings: vec![format!(
-                        "Changing column type from '{}' to '{}' may require a table rewrite \
-                         and AccessExclusiveLock.",
-                        old.data_type, new.data_type
-                    )],
-                    is_blocking: true,
-                }),
-            }
-        }
-
-        // Nullability change
-        if old.is_nullable != new.is_nullable {
-            // SET NOT NULL is blocking (full table scan + AccessExclusiveLock)
-            // DROP NOT NULL is non-blocking
-            let blocking = !new.is_nullable;
-            match dialect {
-                SqlDialect::MySql => {
-                    let warning = if new.is_nullable {
-                        format!(
-                            "Changing '{}' to NULL via MODIFY COLUMN may rebuild the table depending \
-                             on MySQL/MariaDB version and storage engine.",
-                            new.name
-                        )
-                    } else {
-                        format!(
-                            "Changing '{}' to NOT NULL via MODIFY COLUMN can fail if existing rows \
-                             contain NULL values.",
-                            new.name
-                        )
-                    };
-                    stmts.push(MigrationStatement {
-                        sql: format!(
-                            "ALTER TABLE {} MODIFY COLUMN {};",
-                            quote_ident(table, dialect),
-                            column_definition_sql(new, dialect)
-                        ),
-                        warnings: vec![warning],
-                        is_blocking: blocking,
-                    });
-                }
-                SqlDialect::Sqlite => {
-                    stmts.push(MigrationStatement {
-                        sql: format!(
-                            "-- manual migration required for nullability change on {}.{}",
-                            quote_ident(table, dialect),
-                            quote_ident(&new.name, dialect)
-                        ),
-                        warnings: vec![format!(
-                            "SQLite does not support ALTER COLUMN nullability directly for '{}'. \
-                             Recreate table '{table}' with the desired column definition.",
-                            new.name
-                        )],
-                        is_blocking: blocking,
-                    });
-                }
-                _ => {
-                    if new.is_nullable {
-                        stmts.push(MigrationStatement {
-                            sql: format!(
-                                "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL;",
-                                quote_ident(table, dialect),
-                                quote_ident(&new.name, dialect)
-                            ),
-                            warnings: Vec::new(),
-                            is_blocking: false,
-                        });
-                    } else {
-                        stmts.push(MigrationStatement {
-                            sql: format!(
-                                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;",
-                                quote_ident(table, dialect),
-                                quote_ident(&new.name, dialect)
-                            ),
-                            warnings: vec![format!(
-                                "SET NOT NULL on '{}' will scan the entire table to verify no NULLs exist. \
-                                 This acquires AccessExclusiveLock.",
-                                new.name
-                            )],
-                            is_blocking: true,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Default change — non-blocking (metadata-only on modern PG)
-        if old.default != new.default {
-            match &new.default {
-                Some(default) => {
-                    stmts.push(MigrationStatement {
-                        sql: format!(
-                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {default};",
-                            quote_ident(table, dialect),
-                            quote_ident(&new.name, dialect)
-                        ),
-                        warnings: Vec::new(),
-                        is_blocking: false,
-                    });
-                }
-                None => {
-                    stmts.push(MigrationStatement {
-                        sql: format!(
-                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
-                            quote_ident(table, dialect),
-                            quote_ident(&new.name, dialect)
-                        ),
-                        warnings: Vec::new(),
-                        is_blocking: false,
-                    });
-                }
-            }
-        }
-    }
-
-    stmts
 }
 
 #[cfg(test)]
@@ -991,7 +707,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(
@@ -1018,7 +734,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
@@ -1038,7 +754,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].sql.starts_with("CREATE TABLE orders"));
@@ -1061,7 +777,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(
@@ -1094,7 +810,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
@@ -1102,7 +818,6 @@ mod tests {
 
     #[test]
     fn migration_ordering() {
-        // Complex scenario: drop table + add table + modify columns + add index
         let mut left = Schema::new();
         let mut legacy = Table::new("legacy");
         legacy
@@ -1136,11 +851,10 @@ mod tests {
         right.tables.insert("orders".into(), orders);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
 
-        // DROP COLUMN before DROP TABLE before CREATE TABLE before ADD COLUMN
         let drop_col_pos = sqls.iter().position(|s| s.contains("DROP COLUMN")).unwrap();
         let drop_table_pos = sqls.iter().position(|s| s.contains("DROP TABLE")).unwrap();
         let create_table_pos = sqls
@@ -1178,7 +892,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         assert_eq!(stmts[0].sql, "DROP INDEX idx_orders_id ON orders;");
     }
@@ -1198,7 +912,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Sqlite);
+        let stmts = generate_migration(&diff, SqlDialect::Sqlite, false);
 
         assert!(stmts[0].sql.starts_with("-- manual migration required"));
         assert!(stmts[0].warnings[0].contains("does not support ALTER COLUMN TYPE"));
@@ -1219,7 +933,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         assert_eq!(stmts.len(), 1);
         assert_eq!(
@@ -1243,7 +957,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Sqlite);
+        let stmts = generate_migration(&diff, SqlDialect::Sqlite, false);
 
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0]
@@ -1276,7 +990,6 @@ mod tests {
             "created_at".into(),
             col("created_at", "timestamptz", false, None),
         );
-        // Expression index: lower(email)
         t.indexes.insert(
             "idx_users_email_lower".into(),
             Index {
@@ -1286,7 +999,6 @@ mod tests {
                 is_unique: false,
             },
         );
-        // Sorted index: created_at DESC
         t.indexes.insert(
             "idx_users_created_at_desc".into(),
             Index {
@@ -1296,7 +1008,6 @@ mod tests {
                 is_unique: false,
             },
         );
-        // Already-quoted identifier from pg_indexes
         t.indexes.insert(
             "idx_users_mixed".into(),
             Index {
@@ -1309,15 +1020,12 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
 
-        // Expression index — column clause must not be quoted
         assert!(sqls.contains(&"CREATE INDEX idx_users_email_lower ON users(lower(email));"));
-        // Sorted index — DESC must not be quoted
         assert!(sqls.contains(&"CREATE INDEX idx_users_created_at_desc ON users(created_at DESC);"));
-        // Mixed: already-quoted ident + sort order
         assert!(
             sqls.contains(&"CREATE INDEX idx_users_mixed ON users(\"Email\", created_at DESC);")
         );
@@ -1344,22 +1052,18 @@ mod tests {
         right.tables.insert("UserAccounts".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
-        // Table and column names with uppercase must use backticks, not double quotes
         assert!(sqls.iter().any(|s| s.contains("`UserAccounts`")));
         assert!(sqls.iter().any(|s| s.contains("`UserId`")));
         assert!(sqls.iter().any(|s| s.contains("`idx_UserAccounts_email`")));
-        // Must NOT contain double-quoted identifiers
         assert!(!sqls.iter().any(|s| s.contains("\"UserAccounts\"")));
         assert!(!sqls.iter().any(|s| s.contains("\"UserId\"")));
     }
 
     #[test]
     fn mysql_index_columns_are_quoted() {
-        // MySQL index columns are plain identifiers from information_schema,
-        // not raw SQL — they must be quoted when needed.
         let left = Schema::new();
         let mut right = Schema::new();
         let mut t = Table::new("items");
@@ -1377,10 +1081,9 @@ mod tests {
         right.tables.insert("items".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         let sqls: Vec<&str> = stmts.iter().map(|s| s.sql.as_str()).collect();
-        // Column name with uppercase must be backtick-quoted in MySQL index
         assert!(sqls.iter().any(|s| s.contains("(`Select`)")));
     }
 
@@ -1394,48 +1097,31 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::SqlFile);
+        let stmts = generate_migration(&diff, SqlDialect::SqlFile, false);
 
-        // Simple lowercase names should not be quoted for SqlFile dialect
         assert!(stmts[0].sql.contains("CREATE TABLE users"));
         assert!(stmts[0].sql.contains("email text"));
     }
 
     #[test]
     fn quote_ident_postgres() {
-        use super::quote_ident;
         let pg = SqlDialect::Postgres;
 
-        // Simple names pass through unquoted
         assert_eq!(quote_ident("users", pg), "users");
         assert_eq!(quote_ident("idx_orders_id", pg), "idx_orders_id");
-
-        // Names with uppercase get double-quoted
         assert_eq!(quote_ident("Users", pg), "\"Users\"");
-
-        // Names with spaces get double-quoted
         assert_eq!(quote_ident("my table", pg), "\"my table\"");
-
-        // Names with embedded quotes get escaped
         assert_eq!(quote_ident("a\"b", pg), "\"a\"\"b\"");
-
-        // Empty string gets quoted
         assert_eq!(quote_ident("", pg), "\"\"");
     }
 
     #[test]
     fn quote_ident_mysql_uses_backticks() {
-        use super::quote_ident;
         let my = SqlDialect::MySql;
 
-        // Simple names pass through unquoted
         assert_eq!(quote_ident("users", my), "users");
-
-        // Names needing quoting use backticks
         assert_eq!(quote_ident("Users", my), "`Users`");
         assert_eq!(quote_ident("my table", my), "`my table`");
-
-        // Embedded backtick gets escaped
         assert_eq!(quote_ident("a`b", my), "`a``b`");
     }
 
@@ -1456,7 +1142,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         assert!(stmts[0].is_blocking, "DROP COLUMN should be blocking");
     }
 
@@ -1484,7 +1170,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         assert!(stmts[0].is_blocking, "DROP INDEX should be blocking");
     }
 
@@ -1498,7 +1184,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         assert!(!stmts[0].is_blocking, "CREATE TABLE should not be blocking");
     }
 
@@ -1512,7 +1198,7 @@ mod tests {
         let right = Schema::new();
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
         assert!(
             stmts
                 .iter()
@@ -1556,7 +1242,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         assert!(
             stmts[0].sql.contains("DROP FOREIGN KEY"),
@@ -1592,7 +1278,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::MySql);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
         assert!(
             stmts[0].sql.contains("DROP INDEX"),
@@ -1632,7 +1318,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert!(stmts
             .iter()
@@ -1650,7 +1336,7 @@ mod tests {
         right.tables.insert("orders".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres, false);
 
         assert!(rollback.iter().any(|s| s.sql.contains("DROP TABLE orders")));
         assert!(
@@ -1671,7 +1357,7 @@ mod tests {
         let right = Schema::new();
 
         let diff = diff_schemas(&left, &right);
-        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres, false);
 
         assert!(rollback
             .iter()
@@ -1695,7 +1381,7 @@ mod tests {
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
-        let rollback = generate_rollback(&diff, SqlDialect::Postgres);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres, false);
 
         let drop_col = rollback
             .iter()
@@ -1719,7 +1405,7 @@ mod tests {
         right.tables.insert(t.name.clone(), t);
 
         let diff = diff_schemas(&left, &right);
-        let stmts = generate_migration(&diff, SqlDialect::Postgres);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert!(stmts[0]
             .sql
@@ -1727,5 +1413,307 @@ mod tests {
         assert!(stmts[0]
             .sql
             .contains("\"email\"\"; DELETE FROM users; --\" text"));
+    }
+
+    // ── Primary Key migration tests ──
+
+    #[test]
+    fn pk_add_generates_alter_table() {
+        use crate::model::{Constraint, ConstraintKind};
+
+        let mut left = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("orders".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.constraints.insert(
+            "orders_pkey".into(),
+            Constraint {
+                name: "orders_pkey".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::PrimaryKey {
+                    columns: vec!["id".into()],
+                },
+            },
+        );
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
+
+        assert!(stmts
+            .iter()
+            .any(|s| s.sql.contains("ADD CONSTRAINT orders_pkey PRIMARY KEY (id)")));
+    }
+
+    #[test]
+    fn pk_drop_mysql_uses_drop_primary_key() {
+        use crate::model::{Constraint, ConstraintKind};
+
+        let mut left = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.constraints.insert(
+            "orders_pkey".into(),
+            Constraint {
+                name: "orders_pkey".into(),
+                table_name: "orders".into(),
+                kind: ConstraintKind::PrimaryKey {
+                    columns: vec!["id".into()],
+                },
+            },
+        );
+        left.tables.insert("orders".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, false);
+
+        assert!(stmts
+            .iter()
+            .any(|s| s.sql.contains("DROP PRIMARY KEY")));
+    }
+
+    // ── CONCURRENTLY tests ──
+
+    #[test]
+    fn concurrently_generates_concurrent_index_for_postgres() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_users_id".into(),
+            Index {
+                name: "idx_users_id".into(),
+                table_name: "users".into(),
+                columns: vec!["id".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, true);
+
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].sql.contains("CONCURRENTLY"),
+            "Expected CONCURRENTLY in: {}",
+            stmts[0].sql
+        );
+        assert!(!stmts[0].is_blocking, "CONCURRENTLY indexes should not be blocking");
+        assert!(stmts[0].warnings.is_empty(), "No 'Consider CONCURRENTLY' warning when already concurrent");
+    }
+
+    #[test]
+    fn concurrently_not_applied_to_new_table_indexes() {
+        let left = Schema::new();
+
+        let mut right = Schema::new();
+        let mut t = Table::new("orders");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_orders_id".into(),
+            Index {
+                name: "idx_orders_id".into(),
+                table_name: "orders".into(),
+                columns: vec!["id".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("orders".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, true);
+
+        // New table indexes should NOT use CONCURRENTLY (table is empty)
+        let idx_stmt = stmts.iter().find(|s| s.sql.contains("CREATE") && s.sql.contains("INDEX")).unwrap();
+        assert!(
+            !idx_stmt.sql.contains("CONCURRENTLY"),
+            "New table indexes should not use CONCURRENTLY: {}",
+            idx_stmt.sql
+        );
+    }
+
+    #[test]
+    fn concurrently_ignored_for_mysql() {
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.indexes.insert(
+            "idx_users_id".into(),
+            Index {
+                name: "idx_users_id".into(),
+                table_name: "users".into(),
+                columns: vec!["id".into()],
+                is_unique: false,
+            },
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas(&left, &right);
+        let stmts = generate_migration(&diff, SqlDialect::MySql, true);
+
+        assert!(
+            !stmts[0].sql.contains("CONCURRENTLY"),
+            "MySQL should not use CONCURRENTLY"
+        );
+    }
+
+    // ── Rename migration tests ──
+
+    #[test]
+    fn column_rename_generates_alter_rename() {
+        use crate::diff::diff_schemas_with_options;
+
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email_addr".into(), col("email_addr", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("email".into(), col("email", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
+
+        assert!(
+            stmts.iter().any(|s| s.sql.contains("RENAME COLUMN email_addr TO email")),
+            "Expected RENAME COLUMN, got: {:?}",
+            stmts.iter().map(|s| &s.sql).collect::<Vec<_>>()
+        );
+        // Should NOT have DROP + ADD for the renamed column
+        assert!(!stmts.iter().any(|s| s.sql.contains("DROP COLUMN email_addr")));
+        assert!(!stmts.iter().any(|s| s.sql.contains("ADD COLUMN email")));
+    }
+
+    #[test]
+    fn table_rename_generates_alter_rename() {
+        use crate::diff::diff_schemas_with_options;
+
+        let mut left = Schema::new();
+        let mut t = Table::new("user_logs");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("msg".into(), col("msg", "text", true, None));
+        left.tables.insert("user_logs".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("audit_trail");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("msg".into(), col("msg", "text", true, None));
+        right.tables.insert("audit_trail".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
+
+        assert!(
+            stmts.iter().any(|s| s.sql.contains("RENAME TO audit_trail")),
+            "Expected RENAME TO, got: {:?}",
+            stmts.iter().map(|s| &s.sql).collect::<Vec<_>>()
+        );
+        assert!(!stmts.iter().any(|s| s.sql.contains("DROP TABLE user_logs")));
+        assert!(!stmts.iter().any(|s| s.sql.contains("CREATE TABLE audit_trail")));
+    }
+
+    #[test]
+    fn medium_confidence_rename_is_commented_out() {
+        use crate::diff::diff_schemas_with_options;
+
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns.insert(
+            "is_enabled".into(),
+            col("is_enabled", "bool", false, Some("true")),
+        );
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns.insert(
+            "is_active".into(),
+            col("is_active", "bool", false, Some("false")),
+        );
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
+
+        let rename_stmt = stmts
+            .iter()
+            .find(|s| s.sql.contains("RENAME COLUMN"))
+            .expect("Expected a rename statement");
+        assert!(
+            rename_stmt.sql.starts_with("-- "),
+            "Medium confidence rename should be commented out: {}",
+            rename_stmt.sql
+        );
+    }
+
+    #[test]
+    fn rollback_reverses_column_rename() {
+        use crate::diff::diff_schemas_with_options;
+
+        let mut left = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("old_name".into(), col("old_name", "text", true, None));
+        left.tables.insert("users".into(), t);
+
+        let mut right = Schema::new();
+        let mut t = Table::new("users");
+        t.columns
+            .insert("id".into(), col("id", "integer", false, None));
+        t.columns
+            .insert("new_name".into(), col("new_name", "text", true, None));
+        right.tables.insert("users".into(), t);
+
+        let diff = diff_schemas_with_options(&left, &right, true);
+        let rollback = generate_rollback(&diff, SqlDialect::Postgres, false);
+
+        assert!(
+            rollback.iter().any(|s| s.sql.contains("RENAME COLUMN new_name TO old_name")),
+            "Rollback should reverse column rename, got: {:?}",
+            rollback.iter().map(|s| &s.sql).collect::<Vec<_>>()
+        );
     }
 }
