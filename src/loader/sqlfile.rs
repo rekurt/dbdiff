@@ -122,7 +122,12 @@ fn parse_column_definitions(body: &str, table: &mut Table) -> Result<(), DbDiffE
                 is_nullable,
                 default,
             };
-            table.columns.insert(name, column);
+            table.columns.insert(name.clone(), column);
+
+            // Check for inline REFERENCES: col_name TYPE REFERENCES ref_table[(ref_cols)]
+            if let Some(c) = parse_inline_reference(trimmed, &table.name, &name) {
+                table.constraints.insert(c.name.clone(), c);
+            }
         }
     }
 
@@ -222,6 +227,53 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
 
     // PRIMARY KEY — skip (we don't diff PKs)
     None
+}
+
+/// Parse inline REFERENCES from a column definition.
+/// e.g. "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE"
+fn parse_inline_reference(def: &str, table_name: &str, col_name: &str) -> Option<Constraint> {
+    let re = Regex::new(
+        r"(?i)REFERENCES\s+(\w+)\s*(?:\(([^)]+)\))?(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
+    ).ok()?;
+    let cap = re.captures(def)?;
+
+    let ref_table = cap[1].to_string();
+    let ref_columns: Vec<String> = cap
+        .get(2)
+        .map(|m| {
+            m.as_str()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![col_name.to_string()]);
+    let on_delete = cap
+        .get(3)
+        .map(|m| m.as_str().to_uppercase())
+        .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+    let on_update = cap
+        .get(4)
+        .map(|m| m.as_str().to_uppercase())
+        .filter(|s| s != "NO ACTION" && s != "RESTRICT");
+
+    let name = format!(
+        "fk_{}_{}_{}",
+        table_name,
+        ref_table.to_lowercase(),
+        col_name
+    );
+
+    Some(Constraint {
+        name,
+        table_name: table_name.to_string(),
+        kind: ConstraintKind::ForeignKey {
+            columns: vec![col_name.to_string()],
+            ref_table,
+            ref_columns,
+            on_delete,
+            on_update,
+        },
+    })
 }
 
 /// Split a string by a delimiter, but only at the top level (not inside parentheses).

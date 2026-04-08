@@ -39,35 +39,55 @@ pub struct CiChange {
 
 impl CiReport {
     /// Build a CI report from a schema diff and generated migration statements.
+    ///
+    /// When `reverse` is true (rollback mode), the interpretation is flipped:
+    /// added_tables become DROP operations and removed_tables become ADD operations.
     pub fn from_diff(diff: &SchemaDiff, statements: &[MigrationStatement]) -> Self {
-        let mut changes = Vec::new();
+        Self::build(diff, statements, false)
+    }
 
-        // Added tables
+    /// Build a CI report for rollback direction.
+    pub fn from_diff_reversed(diff: &SchemaDiff, statements: &[MigrationStatement]) -> Self {
+        Self::build(diff, statements, true)
+    }
+
+    fn build(diff: &SchemaDiff, statements: &[MigrationStatement], reverse: bool) -> Self {
+        let mut changes = Vec::new();
+        // In reverse mode, swap ADD<->DROP interpretation
+        let (add_label, drop_label) = if reverse {
+            ("DROP", "ADD")
+        } else {
+            ("ADD", "DROP")
+        };
+
+        // Added tables (in reverse mode these are DROP'd)
         for table in &diff.added_tables {
+            let blocking = reverse;
             changes.push(CiChange {
-                change_type: "ADD".to_string(),
+                change_type: add_label.to_string(),
                 object: "TABLE".to_string(),
                 table: table.name.clone(),
                 name: table.name.clone(),
-                description: format!("ADD TABLE {}", table.name),
-                is_blocking: false,
+                description: format!("{add_label} TABLE {}", table.name),
+                is_blocking: blocking,
                 sql: statements
                     .iter()
-                    .find(|s| s.sql.contains("CREATE TABLE") && s.sql.contains(&table.name))
+                    .find(|s| s.sql.contains(&table.name))
                     .map(|s| s.sql.clone())
                     .unwrap_or_default(),
             });
         }
 
-        // Removed tables
+        // Removed tables (in reverse mode these are CREATE'd)
         for table in &diff.removed_tables {
+            let blocking = !reverse;
             changes.push(CiChange {
-                change_type: "DROP".to_string(),
+                change_type: drop_label.to_string(),
                 object: "TABLE".to_string(),
                 table: table.name.clone(),
                 name: table.name.clone(),
-                description: format!("DROP TABLE {}", table.name),
-                is_blocking: true,
+                description: format!("{drop_label} TABLE {}", table.name),
+                is_blocking: blocking,
                 sql: statements
                     .iter()
                     .find(|s| s.sql.contains("DROP TABLE") && s.sql.contains(&table.name))

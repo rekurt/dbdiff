@@ -133,11 +133,10 @@ async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     let format = params.resolve_format(&cfg.output.format);
 
     // Build CI report from the statements matching the selected direction
-    let ci_statements = match params.direction {
-        MigrationDirection::Down => &down_statements,
-        _ => &up_statements,
+    let report = match params.direction {
+        MigrationDirection::Down => CiReport::from_diff_reversed(&diff, &down_statements),
+        _ => CiReport::from_diff(&diff, &up_statements),
     };
-    let report = CiReport::from_diff(&diff, ci_statements);
 
     match format {
         OutputFormat::Pretty => {
