@@ -22,7 +22,7 @@ pub fn load_file(path: &str) -> Result<Schema, DbDiffError> {
 /// Parse all CREATE TABLE statements from SQL content.
 fn parse_create_tables(content: &str, schema: &mut Schema) -> Result<(), DbDiffError> {
     let re = Regex::new(r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(")
-        .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+        .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for cap in re.captures_iter(content) {
         let table_name = cap[1].to_string();
@@ -71,8 +71,8 @@ fn extract_parenthesized_body(content: &str, start: usize) -> Result<String, DbD
     }
 
     if depth != 0 {
-        return Err(DbDiffError::SqlParse(
-            "Unmatched parenthesis in CREATE TABLE statement".to_string(),
+        return Err(DbDiffError::sql_parse(
+            "Unmatched parenthesis in CREATE TABLE statement",
         ));
     }
 
@@ -86,12 +86,12 @@ fn parse_column_definitions(body: &str, table: &mut Table) -> Result<(), DbDiffE
 
     let constraint_re =
         Regex::new(r"(?i)^\s*(CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|EXCLUDE)")
-            .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+            .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     let col_re = Regex::new(
         r"(?i)^\s*(\w+)\s+([\w]+(?:\s*\([^)]*\))?(?:\s+(?:varying|precision|without|with|time|zone|double)\s*(?:\([^)]*\))?)*)\s*(.*)",
     )
-    .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+    .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for part in &parts {
         let trimmed = part.trim();
@@ -260,7 +260,7 @@ fn parse_create_indexes(content: &str, schema: &mut Schema) -> Result<(), DbDiff
     let re = Regex::new(
         r"(?i)CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(\w+)\s*\(([^)]+)\)",
     )
-    .map_err(|e| DbDiffError::SqlParse(e.to_string()))?;
+    .map_err(|e| DbDiffError::sql_parse(e.to_string()))?;
 
     for cap in re.captures_iter(content) {
         let is_unique = cap.get(1).is_some();

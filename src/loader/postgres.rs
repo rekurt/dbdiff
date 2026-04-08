@@ -1,36 +1,83 @@
 use std::sync::OnceLock;
 
-use tokio_postgres::NoTls;
+use tokio_postgres::Client;
 
 use crate::error::{sanitize_dsn, DbDiffError};
 use crate::model::{Column, Index, Schema, Table};
 
+/// SSL mode for PostgreSQL connections.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PgSslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+}
+
 /// Load a schema from a live PostgreSQL database via DSN.
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
+    load_with_ssl(dsn, PgSslMode::Prefer).await
+}
+
+/// Load a schema from a live PostgreSQL database via DSN with specified SSL mode.
+pub async fn load_with_ssl(dsn: &str, ssl_mode: PgSslMode) -> Result<Schema, DbDiffError> {
+    let client = connect(dsn, ssl_mode).await?;
+    load_from_client(&client).await
+}
+
+async fn connect(dsn: &str, ssl_mode: PgSslMode) -> Result<Client, DbDiffError> {
     let host = sanitize_dsn(dsn);
 
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
-        .await
-        .map_err(|e| DbDiffError::PostgresConnect {
-            host: host.clone(),
-            source: e,
-        })?;
+    match ssl_mode {
+        PgSslMode::Disable => connect_no_tls(dsn, &host).await,
+        PgSslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            match connect_tls(dsn, &host).await {
+                Ok(client) => Ok(client),
+                Err(_) => connect_no_tls(dsn, &host).await,
+            }
+        }
+        PgSslMode::Require => connect_tls(dsn, &host).await,
+    }
+}
 
-    // Spawn the connection handler
+async fn connect_no_tls(dsn: &str, host: &str) -> Result<Client, DbDiffError> {
+    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+        .await
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+
+    let h = host.to_string();
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            use std::error::Error;
-            let mut msg = e.to_string();
-            let mut source = e.source();
-            while let Some(cause) = source {
-                msg.push_str(": ");
-                msg.push_str(&cause.to_string());
-                source = cause.source();
-            }
-            eprintln!("PostgreSQL connection error ({}): {msg}", host);
+            eprintln!("PostgreSQL connection error ({h}): {e}");
         }
     });
 
+    Ok(client)
+}
+
+async fn connect_tls(dsn: &str, host: &str) -> Result<Client, DbDiffError> {
+    let tls_connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+    let connector = postgres_native_tls::MakeTlsConnector::new(tls_connector);
+
+    let (client, connection) = tokio_postgres::connect(dsn, connector)
+        .await
+        .map_err(|e| DbDiffError::connection(dsn, e))?;
+
+    let h = host.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("PostgreSQL connection error ({h}): {e}");
+        }
+    });
+
+    Ok(client)
+}
+
+async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
     let mut schema = Schema::new();
 
     // Load columns from information_schema
@@ -139,8 +186,7 @@ fn normalize_default(default: &str) -> String {
     // Remove type casts like ::character varying, ::text, etc.
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?")
-            .expect("hardcoded regex must compile")
+        regex::Regex::new(r"::\w[\w\s]*(?:\([\d,]+\))?").expect("hardcoded regex must compile")
     });
     let cleaned = re.replace_all(default, "").trim().to_string();
 
@@ -329,8 +375,6 @@ mod tests {
 
     #[test]
     fn test_parse_index_with_non_ascii_identifiers() {
-        // 'ı' (U+0131, 2 bytes UTF-8) uppercases to 'I' (1 byte), shifting byte offsets.
-        // This verifies we don't use uppercased offsets to slice the original string.
         assert_eq!(
             parse_index_columns(
                 "CREATE INDEX \"ındex_türkçe\" ON \"schéma\".\"tablo\" USING btree (\"sütun\")"
@@ -341,22 +385,16 @@ mod tests {
 
     #[test]
     fn test_parse_index_table_name_with_parens() {
-        // Table name containing '(' should not confuse the column-list finder.
         assert_eq!(
-            parse_index_columns(
-                "CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"
-            ),
+            parse_index_columns("CREATE INDEX idx ON \"table(weird)\" USING btree (col1, col2)"),
             vec!["col1", "col2"]
         );
     }
 
     #[test]
     fn test_parse_index_quoted_parens_in_columns() {
-        // Parentheses inside double-quoted identifiers should be ignored during depth scan.
         assert_eq!(
-            parse_index_columns(
-                "CREATE INDEX idx ON t USING btree (\"a)\", b)"
-            ),
+            parse_index_columns("CREATE INDEX idx ON t USING btree (\"a)\", b)"),
             vec!["\"a)\"", "b"]
         );
     }

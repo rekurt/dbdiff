@@ -8,10 +8,10 @@ use crate::model::{Column, Index, Schema, Table};
 /// Load a schema from a live MySQL/MariaDB database via DSN.
 pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
     let opts = Opts::from_url(dsn)
-        .map_err(|e| DbDiffError::InvalidArg(format!("Invalid MySQL DSN: {e}")))?;
+        .map_err(|e| DbDiffError::invalid_arg(format!("Invalid MySQL DSN: {e}")))?;
     let db_name = opts
         .db_name()
-        .ok_or_else(|| DbDiffError::InvalidArg("MySQL DSN must include a database name".into()))?
+        .ok_or_else(|| DbDiffError::invalid_arg("MySQL DSN must include a database name"))?
         .to_string();
 
     let pool = mysql_async::Pool::new(OptsBuilder::from_opts(opts.clone()));

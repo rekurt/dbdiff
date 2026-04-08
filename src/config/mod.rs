@@ -50,7 +50,7 @@ pub fn load_config(path: &str) -> Result<Config, DbDiffError> {
 
     let contents = std::fs::read_to_string(path)?;
     let config: Config = serde_yaml::from_str(&contents)
-        .map_err(|e| DbDiffError::InvalidArg(format!("Failed to parse config file: {e}")))?;
+        .map_err(|e| DbDiffError::invalid_arg(format!("Failed to parse config file: {e}")))?;
 
     Ok(config)
 }

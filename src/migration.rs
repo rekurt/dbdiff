@@ -426,10 +426,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "ALTER TABLE users DROP COLUMN old_field;"
-        );
+        assert_eq!(stmts[0].sql, "ALTER TABLE users DROP COLUMN old_field;");
         assert!(stmts[0].warnings[0].contains("destructive"));
     }
 
@@ -505,10 +502,7 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres);
 
         assert_eq!(stmts.len(), 1);
-        assert_eq!(
-            stmts[0].sql,
-            "CREATE INDEX idx_orders_id ON orders(id);"
-        );
+        assert_eq!(stmts[0].sql, "CREATE INDEX idx_orders_id ON orders(id);");
     }
 
     #[test]

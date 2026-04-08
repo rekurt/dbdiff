@@ -84,7 +84,8 @@ fn json_output_format() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"has_changes\": true"))
-        .stdout(predicate::str::contains("\"diff\""));
+        .stdout(predicate::str::contains("\"diff\""))
+        .stdout(predicate::str::contains("\"summary\""));
 }
 
 #[test]
@@ -123,7 +124,28 @@ fn dry_run_does_not_write_file() {
 }
 
 #[test]
-fn out_flag_writes_migration_file() {
+fn safe_by_default_does_not_write_without_write_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_path = dir.path().join("migration.sql");
+
+    // --out without --write should NOT create the file (safe by default)
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Dry run"));
+
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn out_flag_with_write_creates_file() {
     let dir = tempfile::tempdir().unwrap();
     let out_path = dir.path().join("migration.sql");
 
@@ -134,6 +156,7 @@ fn out_flag_writes_migration_file() {
             "tests/fixtures/schema_b.sql",
             "--out",
             out_path.to_str().unwrap(),
+            "--write",
         ])
         .assert()
         .success();
@@ -154,4 +177,69 @@ fn invalid_source_returns_error() {
         .assert()
         .failure()
         .code(2);
+}
+
+#[test]
+fn diff_subcommand_works() {
+    cmd()
+        .args([
+            "diff",
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("table:"));
+}
+
+#[test]
+fn completions_subcommand_works() {
+    cmd()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dbdiff"));
+}
+
+#[test]
+fn summary_shown_in_pretty_output() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Summary:"));
+}
+
+#[test]
+fn summary_in_json_output() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"tables_added\""));
+}
+
+#[test]
+fn timeout_flag_accepted() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--timeout",
+            "5",
+        ])
+        .assert()
+        .success();
 }

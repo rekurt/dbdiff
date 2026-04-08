@@ -11,7 +11,7 @@ use crate::model::{Column, Index, Schema, Table};
 pub fn load(source: &str) -> Result<Schema, DbDiffError> {
     let path = source.strip_prefix("sqlite://").unwrap_or(source);
     if !Path::new(path).exists() {
-        return Err(DbDiffError::InvalidArg(format!(
+        return Err(DbDiffError::invalid_arg(format!(
             "SQLite source file does not exist: {path}"
         )));
     }
@@ -50,7 +50,10 @@ fn get_table_names(conn: &Connection) -> Result<Vec<String>, DbDiffError> {
 
 fn load_columns(conn: &Connection, table_name: &str, table: &mut Table) -> Result<(), DbDiffError> {
     // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_identifier(table_name)))?;
+    let mut stmt = conn.prepare(&format!(
+        "PRAGMA table_info({})",
+        quote_identifier(table_name)
+    ))?;
 
     let columns = stmt.query_map([], |row| {
         let name: String = row.get(1)?;
@@ -76,7 +79,10 @@ fn load_columns(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
 
 fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Result<(), DbDiffError> {
     // PRAGMA index_list returns: seq, name, unique, origin, partial
-    let mut stmt = conn.prepare(&format!("PRAGMA index_list({})", quote_identifier(table_name)))?;
+    let mut stmt = conn.prepare(&format!(
+        "PRAGMA index_list({})",
+        quote_identifier(table_name)
+    ))?;
 
     let indexes: Vec<(String, bool, String)> = stmt
         .query_map([], |row| {
@@ -100,8 +106,10 @@ fn load_indexes(conn: &Connection, table_name: &str, table: &mut Table) -> Resul
 
         // PRAGMA index_info returns: seqno, cid, name
         // For expression indexes, name is NULL — skip those columns
-        let mut col_stmt =
-            conn.prepare(&format!("PRAGMA index_info({})", quote_identifier(&index_name)))?;
+        let mut col_stmt = conn.prepare(&format!(
+            "PRAGMA index_info({})",
+            quote_identifier(&index_name)
+        ))?;
         let columns: Vec<String> = col_stmt
             .query_map([], |row| row.get::<_, Option<String>>(2))?
             .filter_map(|r| r.ok().flatten())
@@ -200,13 +208,9 @@ mod tests {
         );
 
         let err = load(&missing_path).unwrap_err();
-        match err {
-            DbDiffError::InvalidArg(msg) => {
-                assert!(msg.contains("does not exist"));
-                assert!(msg.contains(&missing_path));
-            }
-            other => panic!("expected InvalidArg, got {other:?}"),
-        }
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidArg);
+        assert!(err.message.contains("does not exist"));
+        assert!(err.message.contains(&missing_path));
     }
 
     #[test]

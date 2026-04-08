@@ -1,4 +1,5 @@
 use colored::Colorize;
+use serde::Serialize;
 
 use crate::diff::{ColumnDiff, SchemaDiff, TableDiff};
 use crate::migration::MigrationStatement;
@@ -85,7 +86,7 @@ fn print_column_diff(diff: &ColumnDiff) {
     println!(
         "{}",
         format!(
-            "  ~ column  {:<20} {} → {}",
+            "  ~ column  {:<20} {} -> {}",
             diff.new.name,
             col_type_str(&diff.old),
             col_type_str(&diff.new)
@@ -110,7 +111,7 @@ pub fn print_migration(statements: &[MigrationStatement]) {
     if statements.is_empty() {
         println!(
             "{}",
-            "No migration needed — schemas are identical.".dimmed()
+            "No migration needed -- schemas are identical.".dimmed()
         );
         return;
     }
@@ -130,7 +131,7 @@ pub fn print_migration(statements: &[MigrationStatement]) {
         }
 
         for warning in &stmt.warnings {
-            println!("{}", format!("  ⚠  {warning}").yellow().dimmed());
+            println!("{}", format!("  !!  {warning}").yellow().dimmed());
         }
     }
 }
@@ -141,11 +142,135 @@ pub fn migration_to_sql(statements: &[MigrationStatement]) -> String {
 
     for stmt in statements {
         for warning in &stmt.warnings {
-            lines.push(format!("-- ⚠  {warning}"));
+            lines.push(format!("-- !!  {warning}"));
         }
         lines.push(stmt.sql.clone());
         lines.push(String::new());
     }
 
     lines.join("\n")
+}
+
+/// Summary statistics for a schema diff.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffSummary {
+    pub tables_added: usize,
+    pub tables_removed: usize,
+    pub tables_modified: usize,
+    pub tables_unchanged: usize,
+    pub columns_added: usize,
+    pub columns_removed: usize,
+    pub columns_modified: usize,
+    pub indexes_added: usize,
+    pub indexes_removed: usize,
+}
+
+/// Compute summary statistics from a diff.
+pub fn diff_summary(diff: &SchemaDiff) -> DiffSummary {
+    let columns_added: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.added_columns.len())
+        .sum::<usize>()
+        + diff
+            .added_tables
+            .iter()
+            .map(|t| t.columns.len())
+            .sum::<usize>();
+
+    let columns_removed: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.removed_columns.len())
+        .sum::<usize>()
+        + diff
+            .removed_tables
+            .iter()
+            .map(|t| t.columns.len())
+            .sum::<usize>();
+
+    let columns_modified: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.modified_columns.len())
+        .sum();
+
+    let indexes_added: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.added_indexes.len())
+        .sum::<usize>()
+        + diff
+            .added_tables
+            .iter()
+            .map(|t| t.indexes.len())
+            .sum::<usize>();
+
+    let indexes_removed: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.removed_indexes.len())
+        .sum::<usize>()
+        + diff
+            .removed_tables
+            .iter()
+            .map(|t| t.indexes.len())
+            .sum::<usize>();
+
+    DiffSummary {
+        tables_added: diff.added_tables.len(),
+        tables_removed: diff.removed_tables.len(),
+        tables_modified: diff.modified_tables.len(),
+        tables_unchanged: diff.unchanged_tables.len(),
+        columns_added,
+        columns_removed,
+        columns_modified,
+        indexes_added,
+        indexes_removed,
+    }
+}
+
+/// Print a summary line to stdout.
+pub fn print_summary(diff: &SchemaDiff) {
+    if diff.is_empty() {
+        println!("{}", "Schemas are identical.".green());
+        return;
+    }
+
+    let s = diff_summary(diff);
+    let mut parts = Vec::new();
+
+    if s.tables_added > 0 {
+        parts.push(format!("{} table(s) added", s.tables_added));
+    }
+    if s.tables_removed > 0 {
+        parts.push(format!("{} table(s) removed", s.tables_removed));
+    }
+    if s.tables_modified > 0 {
+        parts.push(format!("{} table(s) modified", s.tables_modified));
+    }
+
+    let mut detail_parts = Vec::new();
+    if s.columns_added > 0 {
+        detail_parts.push(format!("{} columns added", s.columns_added));
+    }
+    if s.columns_removed > 0 {
+        detail_parts.push(format!("{} columns removed", s.columns_removed));
+    }
+    if s.columns_modified > 0 {
+        detail_parts.push(format!("{} columns altered", s.columns_modified));
+    }
+    if s.indexes_added > 0 {
+        detail_parts.push(format!("{} indexes added", s.indexes_added));
+    }
+    if s.indexes_removed > 0 {
+        detail_parts.push(format!("{} indexes removed", s.indexes_removed));
+    }
+
+    let mut summary = format!("Summary: {}", parts.join(", "));
+    if !detail_parts.is_empty() {
+        summary.push_str(&format!(" ({})", detail_parts.join(", ")));
+    }
+
+    println!("{}", summary.bold());
 }
