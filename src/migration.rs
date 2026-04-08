@@ -653,6 +653,16 @@ fn drop_index_sql(idx: &Index, dialect: SqlDialect) -> String {
 }
 
 fn add_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
+    // SQLite does not support ALTER TABLE ADD CONSTRAINT
+    if dialect == SqlDialect::Sqlite {
+        return format!(
+            "-- manual migration required: add constraint {} on {}.{} \
+             (SQLite does not support ALTER TABLE ADD CONSTRAINT; recreate the table)",
+            c.name,
+            c.table_name,
+            c.definition()
+        );
+    }
     let table = quote_ident(&c.table_name, dialect);
     let name = quote_ident(&c.name, dialect);
     match &c.kind {

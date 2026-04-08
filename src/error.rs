@@ -163,8 +163,9 @@ fn format_error_chain(err: &dyn std::error::Error) -> String {
 
 /// Extract host from a DSN, stripping credentials.
 /// "postgres://user:secret@myhost:5432/mydb" -> "myhost:5432/mydb"
+/// Uses rfind('@') to handle passwords containing '@' characters.
 pub fn sanitize_dsn(dsn: &str) -> String {
-    if let Some(at_pos) = dsn.find('@') {
+    if let Some(at_pos) = dsn.rfind('@') {
         dsn[at_pos + 1..].to_string()
     } else {
         dsn.strip_prefix("postgres://")
