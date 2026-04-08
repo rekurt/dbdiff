@@ -590,13 +590,19 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect, _concurrently: 
     // 16c. Reverse column renames (before re-adding constraints that reference old names)
     for table_diff in &diff.modified_tables {
         for rename in &table_diff.renamed_columns {
+            let raw_sql = rename_column_sql(
+                &table_diff.table_name,
+                &rename.new.name,
+                &rename.old.name,
+                dialect,
+            );
+            let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
             statements.push(MigrationStatement {
-                sql: rename_column_sql(
-                    &table_diff.table_name,
-                    &rename.new.name,
-                    &rename.old.name,
-                    dialect,
-                ),
+                sql: if is_medium {
+                    format!("-- {raw_sql}  -- uncomment after manual verification")
+                } else {
+                    raw_sql
+                },
                 warnings: Vec::new(),
                 is_blocking: false,
             });
@@ -605,8 +611,14 @@ pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect, _concurrently: 
 
     // 16d. Reverse table renames (before re-adding constraints that reference old table names)
     for rename in &diff.renamed_tables {
+        let raw_sql = rename_table_sql(&rename.new_name, &rename.old_name, dialect);
+        let is_medium = matches!(rename.confidence, crate::diff::RenameConfidence::Medium);
         statements.push(MigrationStatement {
-            sql: rename_table_sql(&rename.new_name, &rename.old_name, dialect),
+            sql: if is_medium {
+                format!("-- {raw_sql}  -- uncomment after manual verification")
+            } else {
+                raw_sql
+            },
             warnings: Vec::new(),
             is_blocking: false,
         });

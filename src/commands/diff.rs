@@ -105,6 +105,14 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         }
     };
 
+    if params.concurrently && !matches!(migration_dialect, SqlDialect::Postgres) {
+        eprintln!(
+            "Warning: --concurrently only affects PostgreSQL. \
+             Ignoring for {:?} dialect. Transaction wrapping is also disabled.",
+            migration_dialect
+        );
+    }
+
     let up_statements = migration::generate_migration(&diff, migration_dialect, params.concurrently);
     let down_statements = migration::generate_rollback(&diff, migration_dialect, params.concurrently);
     let format = params.resolve_format(&cfg.output.format);

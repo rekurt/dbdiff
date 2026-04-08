@@ -353,10 +353,12 @@ pub fn migration_to_sql(statements: &[MigrationStatement], wrap_transaction: boo
 pub struct DiffSummary {
     pub tables_added: usize,
     pub tables_removed: usize,
+    pub tables_renamed: usize,
     pub tables_modified: usize,
     pub tables_unchanged: usize,
     pub columns_added: usize,
     pub columns_removed: usize,
+    pub columns_renamed: usize,
     pub columns_modified: usize,
     pub indexes_added: usize,
     pub indexes_removed: usize,
@@ -446,13 +448,21 @@ pub fn diff_summary(diff: &SchemaDiff) -> DiffSummary {
             .map(|t| t.constraints.len())
             .sum::<usize>();
 
+    let columns_renamed: usize = diff
+        .modified_tables
+        .iter()
+        .map(|t| t.renamed_columns.len())
+        .sum();
+
     DiffSummary {
         tables_added: diff.added_tables.len(),
         tables_removed: diff.removed_tables.len(),
+        tables_renamed: diff.renamed_tables.len(),
         tables_modified: diff.modified_tables.len(),
         tables_unchanged: diff.unchanged_tables.len(),
         columns_added,
         columns_removed,
+        columns_renamed,
         columns_modified,
         indexes_added,
         indexes_removed,
@@ -485,6 +495,9 @@ pub fn print_summary(diff: &SchemaDiff) {
     if s.tables_removed > 0 {
         parts.push(format!("{} table(s) removed", s.tables_removed));
     }
+    if s.tables_renamed > 0 {
+        parts.push(format!("{} table(s) renamed", s.tables_renamed));
+    }
     if s.tables_modified > 0 {
         parts.push(format!("{} table(s) modified", s.tables_modified));
     }
@@ -495,6 +508,9 @@ pub fn print_summary(diff: &SchemaDiff) {
     }
     if s.columns_removed > 0 {
         detail_parts.push(format!("{} columns removed", s.columns_removed));
+    }
+    if s.columns_renamed > 0 {
+        detail_parts.push(format!("{} columns renamed", s.columns_renamed));
     }
     if s.columns_modified > 0 {
         detail_parts.push(format!("{} columns altered", s.columns_modified));
