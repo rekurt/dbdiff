@@ -85,6 +85,8 @@ pub struct EnumDiff {
     pub name: String,
     pub added_values: Vec<String>,
     pub removed_values: Vec<String>,
+    /// True when the values are the same set but in a different order.
+    pub reordered: bool,
 }
 
 /// A sequence that changed its properties.
@@ -313,10 +315,15 @@ fn diff_enums(
                     .filter(|v| !right_enum.values.contains(v))
                     .cloned()
                     .collect();
+                // Only emit a diff if there are actual value additions or removals.
+                // Order-only changes (same set, different order) are tracked as
+                // reordered_values so migration can emit a warning.
+                let is_order_only = added_values.is_empty() && removed_values.is_empty();
                 modified.push(EnumDiff {
                     name: name.clone(),
                     added_values,
                     removed_values,
+                    reordered: is_order_only,
                 });
             }
         }
@@ -728,6 +735,34 @@ mod tests {
         let diff = diff_schemas(&left, &right);
         assert_eq!(diff.modified_enums.len(), 1);
         assert_eq!(diff.modified_enums[0].added_values, vec!["suspended"]);
+        assert!(diff.modified_enums[0].removed_values.is_empty());
+        assert!(!diff.modified_enums[0].reordered);
+    }
+
+    #[test]
+    fn enum_order_change_detected_as_reordered() {
+        let mut left = Schema::new();
+        left.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["active".into(), "inactive".into()],
+            },
+        );
+
+        let mut right = Schema::new();
+        right.enums.insert(
+            "status".into(),
+            EnumType {
+                name: "status".into(),
+                values: vec!["inactive".into(), "active".into()],
+            },
+        );
+
+        let diff = diff_schemas(&left, &right);
+        assert_eq!(diff.modified_enums.len(), 1);
+        assert!(diff.modified_enums[0].reordered);
+        assert!(diff.modified_enums[0].added_values.is_empty());
         assert!(diff.modified_enums[0].removed_values.is_empty());
     }
 }

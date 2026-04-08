@@ -131,9 +131,10 @@ fn parse_column_definitions(body: &str, table: &mut Table) -> Result<(), DbDiffE
 
 /// Parse a constraint definition from a CREATE TABLE body.
 fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
-    // CONSTRAINT name FOREIGN KEY (cols) REFERENCES ref_table(ref_cols) [ON DELETE ...] [ON UPDATE ...]
+    // CONSTRAINT name FOREIGN KEY (cols) REFERENCES ref_table[(ref_cols)] [ON DELETE ...] [ON UPDATE ...]
+    // The (ref_cols) part is optional — when omitted, references the primary key
     let fk_re = Regex::new(
-        r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(\w+)\s*\(([^)]+)\)(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
+        r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+(\w+)\s*(?:\(([^)]+)\))?(?:\s+ON\s+DELETE\s+(\w+(?:\s+\w+)?))?(?:\s+ON\s+UPDATE\s+(\w+(?:\s+\w+)?))?"
     ).ok()?;
     if let Some(cap) = fk_re.captures(def) {
         let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
@@ -149,7 +150,16 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
                 )
             });
         let ref_table = cap[3].to_string();
-        let ref_columns: Vec<String> = cap[4].split(',').map(|s| s.trim().to_string()).collect();
+        // When ref columns are omitted, default to "id" (conventional PK)
+        let ref_columns: Vec<String> = cap
+            .get(4)
+            .map(|m| {
+                m.as_str()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["id".to_string()]);
         let on_delete = cap
             .get(5)
             .map(|m| m.as_str().to_string())

@@ -122,6 +122,22 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         });
     }
     for ed in &diff.modified_enums {
+        if ed.reordered {
+            statements.push(MigrationStatement {
+                sql: format!(
+                    "-- enum type {} has values in a different order",
+                    quote_ident(&ed.name, dialect)
+                ),
+                warnings: vec![format!(
+                    "Enum '{}' has the same values but in a different order. \
+                     PostgreSQL does not support reordering enum values. \
+                     Recreate the type manually if ordering matters for comparisons.",
+                    ed.name
+                )],
+                is_blocking: false,
+            });
+            continue;
+        }
         for val in &ed.added_values {
             statements.push(MigrationStatement {
                 sql: format!(
