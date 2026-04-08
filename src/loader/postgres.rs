@@ -167,6 +167,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
              JOIN information_schema.key_column_usage kcu \
                ON tc.constraint_name = kcu.constraint_name \
                AND tc.table_schema = kcu.table_schema \
+               AND tc.table_name = kcu.table_name \
              JOIN information_schema.constraint_column_usage ccu \
                ON ccu.constraint_name = tc.constraint_name \
                AND ccu.table_schema = tc.table_schema \
@@ -174,7 +175,7 @@ async fn load_from_client(client: &Client) -> Result<Schema, DbDiffError> {
                ON rc.constraint_name = tc.constraint_name \
                AND rc.constraint_schema = tc.table_schema \
              WHERE tc.table_schema = 'public' \
-               AND tc.constraint_type IN ('FOREIGN KEY', 'UNIQUE', 'CHECK') \
+               AND tc.constraint_type IN ('FOREIGN KEY', 'UNIQUE') \
              ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position",
             &[],
         )

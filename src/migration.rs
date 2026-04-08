@@ -182,7 +182,7 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
         });
     }
 
-    // Phase 8: CREATE TABLEs
+    // Phase 8: CREATE TABLEs (without constraints — those come after all tables exist)
     for table in &diff.added_tables {
         statements.push(MigrationStatement {
             sql: create_table_sql(table, dialect),
@@ -197,7 +197,10 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect) -> Vec<Migrati
                 is_blocking: false, // Index on brand-new table is non-blocking
             });
         }
+    }
 
+    // Phase 8b: ADD CONSTRAINTs for new tables (after ALL tables exist, so FK references resolve)
+    for table in &diff.added_tables {
         for c in table.constraints.values() {
             statements.push(MigrationStatement {
                 sql: add_constraint_sql(c, dialect),

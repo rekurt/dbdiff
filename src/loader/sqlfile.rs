@@ -190,11 +190,17 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
     // CONSTRAINT name CHECK (expr)
     let check_re = Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?CHECK\s*\((.+)\)\s*$").ok()?;
     if let Some(cap) = check_re.captures(def) {
+        let expression = cap[2].trim().to_string();
         let name = cap
             .get(1)
             .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| format!("check_{}", table_name));
-        let expression = cap[2].trim().to_string();
+            .unwrap_or_else(|| {
+                // Use a hash of the expression to ensure uniqueness for unnamed checks
+                let hash = expression
+                    .bytes()
+                    .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                format!("check_{}_{:x}", table_name, hash)
+            });
         return Some(Constraint {
             name: name.clone(),
             table_name: table_name.to_string(),
