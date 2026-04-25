@@ -41,7 +41,7 @@ native-tls = { version = "0.2", optional = true }
 mysql_async = { version = "0.34", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 colored = "3"
-indicatif = "0.17"
+indicatif = "0.18"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
