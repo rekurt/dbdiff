@@ -94,6 +94,26 @@ pub struct Cli {
     /// Force migration even when unique indexes would fail due to duplicate data (adds TRUNCATE TABLE)
     #[arg(long)]
     pub force: bool,
+
+    /// UX preset for common workflows (dev, ci, safe-migrate)
+    #[arg(long, value_enum)]
+    pub profile: Option<RunProfile>,
+
+    /// Explicitly write migration SQL to this file (shortcut for --out FILE --write)
+    #[arg(long, value_name = "FILE", conflicts_with = "out")]
+    pub emit: Option<String>,
+
+    /// Plan-only mode (alias for --dry-run)
+    #[arg(long)]
+    pub plan: bool,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum RunProfile {
+    Dev,
+    Ci,
+    #[value(name = "safe-migrate")]
+    SafeMigrate,
 }
 
 /// Color output mode.
@@ -234,6 +254,18 @@ pub struct DiffArgs {
     /// Force migration even when unique indexes would fail due to duplicate data (adds TRUNCATE TABLE)
     #[arg(long)]
     pub force: bool,
+
+    /// UX preset for common workflows (dev, ci, safe-migrate)
+    #[arg(long, value_enum)]
+    pub profile: Option<RunProfile>,
+
+    /// Explicitly write migration SQL to this file (shortcut for --out FILE --write)
+    #[arg(long, value_name = "FILE", conflicts_with = "out")]
+    pub emit: Option<String>,
+
+    /// Plan-only mode (alias for --dry-run)
+    #[arg(long)]
+    pub plan: bool,
 }
 
 /// Migration direction for output.
@@ -315,6 +347,7 @@ pub struct DiffParams {
     pub concurrently: bool,
     pub detect_renames: bool,
     pub force: bool,
+    pub plan_mode: bool,
 }
 
 impl Cli {
@@ -337,9 +370,29 @@ impl Cli {
                 } else {
                     String::new() // Will be caught by validation
                 };
-                // Safe-by-default: when --out is specified, default to dry-run unless --write is given
-                let should_write = if self.out.is_some() {
-                    self.write && !self.dry_run
+                let emit_specified = self.emit.is_some();
+                let out = self.out.or(self.emit);
+                let mut ci = self.ci;
+                let mut fail_on_blocking = self.fail_on_blocking;
+                let mut dry_run = self.dry_run || self.plan;
+                let mut write = self.write;
+                if emit_specified {
+                    write = true;
+                }
+                if let Some(profile) = self.profile {
+                    match profile {
+                        RunProfile::Dev => {}
+                        RunProfile::Ci => {
+                            ci = true;
+                        }
+                        RunProfile::SafeMigrate => {
+                            dry_run = true;
+                            fail_on_blocking = true;
+                        }
+                    }
+                }
+                let should_write = if out.is_some() {
+                    write && !dry_run
                 } else {
                     false
                 };
@@ -347,8 +400,8 @@ impl Cli {
                 ResolvedCommand::Diff(DiffParams {
                     source,
                     target_source,
-                    out: self.out,
-                    ci: self.ci,
+                    out,
+                    ci,
                     should_write,
                     format: self.format,
                     config: self.config,
@@ -357,11 +410,12 @@ impl Cli {
                     direction: self.direction,
                     color: self.color,
                     explain: self.explain,
-                    fail_on_blocking: self.fail_on_blocking,
+                    fail_on_blocking,
                     transaction,
                     concurrently: self.concurrently,
                     detect_renames: self.detect_renames,
                     force: self.force,
+                    plan_mode: dry_run,
                 })
             }
         }
@@ -381,20 +435,36 @@ impl DiffArgs {
         } else {
             self.target.unwrap_or_default()
         };
-
-        // Safe-by-default: when --out is specified, default to dry-run unless --write is given
-        let should_write = if self.out.is_some() {
-            self.write && !self.dry_run
+        let emit_specified = self.emit.is_some();
+        let out = self.out.or(self.emit);
+        let mut ci = self.ci;
+        let mut fail_on_blocking = self.fail_on_blocking;
+        let mut dry_run = self.dry_run || self.plan;
+        let mut write = self.write;
+        if emit_specified {
+            write = true;
+        }
+        if let Some(profile) = self.profile {
+            match profile {
+                RunProfile::Dev => {}
+                RunProfile::Ci => ci = true,
+                RunProfile::SafeMigrate => {
+                    dry_run = true;
+                    fail_on_blocking = true;
+                }
+            }
+        }
+        let should_write = if out.is_some() {
+            write && !dry_run
         } else {
             false
         };
-
         let transaction = !self.no_transaction && !self.concurrently;
         DiffParams {
             source: self.source,
             target_source,
-            out: self.out,
-            ci: self.ci,
+            out,
+            ci,
             should_write,
             format: self.format,
             config: self.config,
@@ -403,11 +473,12 @@ impl DiffArgs {
             direction: self.direction,
             color: self.color,
             explain: self.explain,
-            fail_on_blocking: self.fail_on_blocking,
+            fail_on_blocking,
             transaction,
             concurrently: self.concurrently,
             detect_renames: self.detect_renames,
             force: self.force,
+            plan_mode: dry_run,
         }
     }
 }
