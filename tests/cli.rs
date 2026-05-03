@@ -468,3 +468,69 @@ fn yaml_output_format() {
         .success()
         .stdout(predicate::str::contains("equal: false"));
 }
+
+#[test]
+fn emit_flag_writes_file_without_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_path = dir.path().join("migration_emit.sql");
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--emit",
+            out_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(out_path.exists());
+}
+
+#[test]
+fn plan_flag_keeps_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_path = dir.path().join("migration_plan.sql");
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--emit",
+            out_path.to_str().unwrap(),
+            "--plan",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Dry run"));
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn fail_on_blocking_requires_ci() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--fail-on-blocking",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("requires --ci"));
+}
+
+#[test]
+fn ci_compact_output_format() {
+    cmd()
+        .args([
+            "tests/fixtures/schema_a.sql",
+            "--schema",
+            "tests/fixtures/schema_b.sql",
+            "--format",
+            "ci",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CI summary:"));
+}

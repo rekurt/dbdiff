@@ -318,6 +318,9 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             })?;
             print!("{yaml}");
         }
+        OutputFormat::Ci => {
+            output::print_ci_compact(&report);
+        }
         OutputFormat::Sql => match params.direction {
             MigrationDirection::Up => {
                 print!(

@@ -326,6 +326,7 @@ pub enum OutputFormat {
     Json,
     Yaml,
     Sql,
+    Ci,
 }
 
 /// Resolved diff parameters, normalized from either top-level or subcommand args.
