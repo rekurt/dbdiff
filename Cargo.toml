@@ -1,6 +1,6 @@
 [package]
 name = "dbdiff"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.75"
 authors = ["rekurt"]
@@ -30,6 +30,7 @@ default = ["postgres", "mysql", "sqlite"]
 postgres = ["dep:tokio-postgres", "dep:postgres-native-tls", "dep:native-tls"]
 mysql = ["dep:mysql_async"]
 sqlite = ["dep:rusqlite"]
+vendored-tls = ["dep:openssl"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -39,6 +40,7 @@ tokio-postgres = { version = "0.7", optional = true }
 postgres-native-tls = { version = "0.5", optional = true }
 native-tls = { version = "0.2", optional = true }
 mysql_async = { version = "0.34", optional = true }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 colored = "3"
 indicatif = "0.18"
