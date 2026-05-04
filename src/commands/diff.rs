@@ -15,7 +15,18 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     apply_color_mode(params.color);
 
     if params.target_source.is_empty() {
-        eprintln!("Error: Either a target DSN or --schema <file> is required");
+        eprintln!("Error: Either a target DSN or --schema <file> is required.");
+        eprintln!("Try: dbdiff <SOURCE_DSN> <TARGET_DSN>");
+        eprintln!("or:  dbdiff <SOURCE_DSN> --schema ./schema.sql");
+        return Err(ExitCode::from(2));
+    }
+
+    if params.fail_on_blocking && !params.ci {
+        eprintln!("Error: --fail-on-blocking requires --ci.");
+        eprintln!(
+            "Try: dbdiff {} {} --ci --fail-on-blocking",
+            params.source, params.target_source
+        );
         return Err(ExitCode::from(2));
     }
 
@@ -78,11 +89,8 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         colored::control::set_override(false);
     }
 
-    let diff = dbdiff::diff::diff_schemas_with_options(
-        &left.schema,
-        &right.schema,
-        params.detect_renames,
-    );
+    let diff =
+        dbdiff::diff::diff_schemas_with_options(&left.schema, &right.schema, params.detect_renames);
 
     if let Err(msg) = check_protected(&diff, &cfg.protected, params.direction) {
         eprintln!("Error: {msg}");
@@ -114,27 +122,30 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         );
     }
 
-    let mut up_statements = migration::generate_migration(&diff, migration_dialect, params.concurrently);
-    let down_statements = migration::generate_rollback(&diff, migration_dialect, params.concurrently);
+    let mut up_statements =
+        migration::generate_migration(&diff, migration_dialect, params.concurrently);
+    let down_statements =
+        migration::generate_rollback(&diff, migration_dialect, params.concurrently);
 
     // Check for duplicate data that would prevent unique index creation
-    let is_pg_source = params.source.starts_with("postgres://")
-        || params.source.starts_with("postgresql://");
+    let is_pg_source =
+        params.source.starts_with("postgres://") || params.source.starts_with("postgresql://");
 
     if is_pg_source {
         let unique_indexes: Vec<(&str, &str, &[String])> = diff
             .modified_tables
             .iter()
             .flat_map(|td| {
-                td.added_indexes.iter().filter(|idx| idx.is_unique).map(
-                    move |idx| {
+                td.added_indexes
+                    .iter()
+                    .filter(|idx| idx.is_unique)
+                    .map(move |idx| {
                         (
                             td.table_name.as_str(),
                             idx.name.as_str(),
                             idx.columns.as_slice(),
                         )
-                    },
-                )
+                    })
             })
             .collect();
 
@@ -168,7 +179,9 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             if !duplicates.is_empty() {
                 if !params.force {
                     eprintln!();
-                    eprintln!("Error: Duplicate data found that would prevent unique index creation:");
+                    eprintln!(
+                        "Error: Duplicate data found that would prevent unique index creation:"
+                    );
                     eprintln!();
                     for dup in &duplicates {
                         eprintln!(
@@ -210,9 +223,9 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
                     });
 
                     if needs_truncate {
-                        if let Some(table) = dup_tables.iter().find(|t| {
-                            sql_matches_table(&stmt.sql, t)
-                        }) {
+                        if let Some(table) =
+                            dup_tables.iter().find(|t| sql_matches_table(&stmt.sql, t))
+                        {
                             patched.push(MigrationStatement {
                                 sql: format!(
                                     "TRUNCATE TABLE \"{table}\";",
@@ -305,18 +318,33 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             })?;
             print!("{yaml}");
         }
+        OutputFormat::Ci => {
+            output::print_ci_compact(&report);
+        }
         OutputFormat::Sql => match params.direction {
             MigrationDirection::Up => {
-                print!("{}", output::migration_to_sql(&up_statements, params.transaction));
+                print!(
+                    "{}",
+                    output::migration_to_sql(&up_statements, params.transaction)
+                );
             }
             MigrationDirection::Down => {
-                print!("{}", output::migration_to_sql(&down_statements, params.transaction));
+                print!(
+                    "{}",
+                    output::migration_to_sql(&down_statements, params.transaction)
+                );
             }
             MigrationDirection::Both => {
                 println!("-- === UP ===");
-                print!("{}", output::migration_to_sql(&up_statements, params.transaction));
+                print!(
+                    "{}",
+                    output::migration_to_sql(&up_statements, params.transaction)
+                );
                 println!("-- === DOWN ===");
-                print!("{}", output::migration_to_sql(&down_statements, params.transaction));
+                print!(
+                    "{}",
+                    output::migration_to_sql(&down_statements, params.transaction)
+                );
             }
         },
     }
@@ -324,8 +352,12 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     if let Some(ref path) = params.out {
         if params.should_write {
             let sql = match params.direction {
-                MigrationDirection::Up => output::migration_to_sql(&up_statements, params.transaction),
-                MigrationDirection::Down => output::migration_to_sql(&down_statements, params.transaction),
+                MigrationDirection::Up => {
+                    output::migration_to_sql(&up_statements, params.transaction)
+                }
+                MigrationDirection::Down => {
+                    output::migration_to_sql(&down_statements, params.transaction)
+                }
                 MigrationDirection::Both => {
                     format!(
                         "-- === UP ===\n{}\n-- === DOWN ===\n{}",
@@ -340,8 +372,26 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
             })?;
             eprintln!("Migration written to {path}");
         } else {
-            eprintln!("Dry run: would write migration to {path} (use --write to save)");
+            eprintln!("Dry run (plan mode): would write migration to {path} (use --write or --emit <FILE> to save)");
         }
+    }
+
+    if matches!(format, OutputFormat::Pretty) && !params.ci {
+        eprintln!("\nNext steps:");
+        if params.out.is_none() {
+            eprintln!(
+                "  • Save migration: dbdiff {} {} --emit migration.sql",
+                params.source, params.target_source
+            );
+        }
+        eprintln!(
+            "  • CI gate:        dbdiff {} {} --ci",
+            params.source, params.target_source
+        );
+        eprintln!(
+            "  • Strict CI:      dbdiff {} {} --ci --fail-on-blocking",
+            params.source, params.target_source
+        );
     }
 
     if params.ci && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
