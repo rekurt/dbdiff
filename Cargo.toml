@@ -41,7 +41,7 @@ postgres-native-tls = { version = "0.5", optional = true }
 native-tls = { version = "0.2", optional = true }
 mysql_async = { version = "0.34", optional = true }
 openssl = { version = "0.10", features = ["vendored"], optional = true }
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 colored = "3"
 indicatif = "0.18"
 regex = "1"
