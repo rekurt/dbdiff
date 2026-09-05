@@ -7,6 +7,8 @@
 
 Compare database schemas across environments and generate safe migration SQL — in one command.
 
+[Project website](https://rekurt.github.io/dbdiff/) · [All projects by rekurt](https://rekurt.github.io/projects/)
+
 ```
 $ dbdiff postgres://prod/myapp postgres://staging/myapp
 
