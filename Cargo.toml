@@ -16,6 +16,8 @@ exclude = [
     "tests/fixtures/",
     "benches/",
     "doc/",
+    "examples/",
+    "scripts/",
     ".editorconfig",
     "deny.toml",
     "cliff.toml",

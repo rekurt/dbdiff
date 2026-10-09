@@ -1,287 +1,260 @@
-# dbdiff
+<p align="center">
+  <img src="doc/assets/banner.svg" alt="dbdiff — inspect schema drift, review migration SQL, gate CI" width="100%">
+</p>
 
-[![Rust](https://img.shields.io/badge/rust-1.88+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/rekurt/dbdiff/ci.yml?style=flat-square&label=CI)](https://github.com/rekurt/dbdiff/actions)
-[![Release](https://img.shields.io/github/v/release/rekurt/dbdiff?style=flat-square)](https://github.com/rekurt/dbdiff/releases)
+<p align="center">
+  <a href="https://github.com/rekurt/dbdiff/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/rekurt/dbdiff/ci.yml?branch=master&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/rekurt/dbdiff/releases"><img src="https://img.shields.io/github/v/release/rekurt/dbdiff?style=flat-square" alt="Latest release"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.88%2B-orange?style=flat-square&logo=rust" alt="Rust 1.88 or newer"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-34d399?style=flat-square" alt="MIT license"></a>
+</p>
 
-Compare database schemas across environments and generate safe migration SQL — in one command.
+<p align="center">
+  <strong>Compare database schemas. See what changed. Generate SQL you can review.</strong><br>
+  PostgreSQL · MySQL / MariaDB · SQLite · SQL files · JSON snapshots
+</p>
 
-[Project website](https://rekurt.github.io/dbdiff/) · [All projects by rekurt](https://rekurt.github.io/projects/)
+<p align="center">
+  <a href="#try-the-demo">Try the demo</a> ·
+  <a href="#install">Install</a> ·
+  <a href="doc/cli.md">CLI guide</a> ·
+  <a href="https://rekurt.github.io/dbdiff/">Website</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-```
-$ dbdiff postgres://prod/myapp postgres://staging/myapp
+## See it in action
 
-~ table: orders
-  + column  paid_at        timestamptz NOT NULL DEFAULT now()
-  + index   idx_orders_paid_at  ON orders(paid_at)
-  - column  payment_date   varchar(32)
+![Animated terminal demo of real schema differences and CI exit codes](doc/assets/demo.gif)
 
-~ table: users
-  + column  deleted_at     timestamptz
+*[Static preview](doc/assets/demo.png). Excerpts from the offline demo below, captured from the actual CLI. The full run also verifies JSON output, migration files, rollback SQL, and preview behavior.*
 
-Generated migration → migration_20240406_143201.sql
-```
+- **Find drift before a deploy:** compare current and desired schemas from files or live databases.
+- **Review the migration:** see generated SQL, destructive-operation warnings, and a rollback plan.
+- **Gate your pipeline:** machine-readable reports and explicit exit codes for drift and blocking operations.
+- **Work offline:** compare SQL files or export a JSON snapshot for later review.
 
----
+`dbdiff` generates migration SQL; it does **not** execute that SQL against your database.
 
-## Why dbdiff?
+## Try the demo
 
-Most teams discover schema drift at the worst possible moment — right before a deploy. Existing tools either support only one database, require heavy setup, or can't compare a live DB against a `.sql` file.
+No database server, credentials, or Docker required. From a checkout:
 
-`dbdiff` is a single binary that works anywhere CI runs.
-
-- **Zero dependencies** — one static binary, no runtime, no Docker required
-- **DSN vs DSN** or **DSN vs SQL file** — compare any two sources
-- **CI-native** — non-zero exit code on drift, structured output, GitHub Actions support
-- **Safe migrations** — warns about locking operations before you run them
-- **Multi-database** — PostgreSQL, MySQL/MariaDB and SQLite backends, enabled by default.
-
----
-
-## Install
-
-**Cargo:**
-```bash
-cargo install dbdiff
-```
-
-**Binary** — download from [Releases](https://github.com/rekurt/dbdiff/releases) and put it in your `$PATH`:
-
-```bash
-# Linux (x86_64)
-curl -sSL https://github.com/rekurt/dbdiff/releases/latest/download/dbdiff-x86_64-unknown-linux-musl.tar.gz | tar xz
-sudo mv dbdiff /usr/local/bin/
-
-# macOS (Apple Silicon)
-curl -sSL https://github.com/rekurt/dbdiff/releases/latest/download/dbdiff-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv dbdiff /usr/local/bin/
-```
-
-**From source:**
 ```bash
 git clone https://github.com/rekurt/dbdiff.git
 cd dbdiff
-cargo build --release
-# Binary is at ./target/release/dbdiff
+cargo build --locked
+python3 examples/demo/run.py --bin target/debug/dbdiff
 ```
 
----
+Requires Rust 1.88+ and Python 3.9+. On Windows, use `python` and `target/debug/dbdiff.exe`.
 
-## Usage
+The demo replaces a free-form payment date with a timestamp, adds an index, and introduces soft deletion. It verifies four changes and the CI exit codes **1 → 3 → 0**, then saves the transcript, JSON report, forward migration, and rollback under `target/demo/`.
 
-### Compare two live databases
+Or, with `dbdiff` installed, run the comparison directly:
 
 ```bash
-dbdiff postgres://user:pass@prod-host/myapp \
-       postgres://user:pass@staging-host/myapp
+dbdiff examples/demo/before.sql examples/demo/after.sql
 ```
 
-### Compare a live database against a schema file
+<details>
+<summary>Expected diff (excerpt)</summary>
+
+```text
+~ table: orders
+  + column  paid_at              timestamp
+  - column  payment_date         text
+  + index   idx_orders_paid_at ON orders(paid_at)
+
+~ table: users
+  + column  deleted_at           timestamp
+```
+
+The full output includes unchanged columns, migration SQL, warnings, a summary, and next steps.
+
+</details>
+
+See the [demo walkthrough](examples/demo/README.md) for individual commands and how to regenerate the animation.
+
+## Install
+
+### Release binaries
+
+Download the archive for your platform from [Releases](https://github.com/rekurt/dbdiff/releases), extract it, and put `dbdiff` (or `dbdiff.exe`) on your `PATH`.
+
+| Platform | Archive target |
+| --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` or `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+### Build from source
 
 ```bash
-dbdiff postgres://user:pass@prod-host/myapp --schema ./schema.sql
+cargo install --git https://github.com/rekurt/dbdiff --locked
 ```
 
-Useful during code review — verify that a migration file actually matches what's in production.
-
-### Compare MySQL databases
+All three database backends are enabled by default. For a smaller build:
 
 ```bash
-dbdiff mysql://user:pass@prod-host/myapp mysql://user:pass@staging-host/myapp
+cargo install --git https://github.com/rekurt/dbdiff --locked \
+  --no-default-features --features postgres,sqlite
 ```
 
-### Compare a SQLite database against a schema file
+Source builds require Rust 1.88+ and the platform's build tools; PostgreSQL/MySQL builds may also require TLS development libraries. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Everyday usage
+
+### Compare current → desired
+
+The **first source is the current schema**. The **second source is the desired schema**. Forward SQL changes the first to match the second.
 
 ```bash
-dbdiff myapp.db --schema ./schema.sql
+# Two live PostgreSQL databases
+dbdiff "$CURRENT_DSN" "$DESIRED_DSN"
+
+# Live database versus a complete desired schema file
+dbdiff "$CURRENT_DSN" --schema schema.sql
+
+# MySQL / MariaDB (both variables contain mysql:// or mariadb:// DSNs)
+dbdiff "$MYSQL_CURRENT_DSN" "$MYSQL_DESIRED_DSN"
+
+# SQLite database versus a schema file
+dbdiff app.db --schema schema.sql
+
+# Two SQL files, fully offline
+dbdiff current.sql desired.sql
 ```
 
-### Save the generated migration to a file
+A schema file should describe the **complete desired structure with CREATE statements**, rather than an incremental ALTER migration. Compare like-for-like database backends; a SQL file can be used on either side. SQL-file-only comparisons generate PostgreSQL-style migration SQL.
+
+### Preview, then save
 
 ```bash
-dbdiff postgres://prod/myapp postgres://staging/myapp \
-  --out migration.sql
+# Preview only: this does not create migration.sql
+dbdiff current.sql desired.sql --out migration.sql
+
+# Explicitly save the forward migration
+dbdiff current.sql desired.sql --emit migration.sql
+
+# Equivalent write command
+dbdiff current.sql desired.sql --out migration.sql --write
+
+# Save a separate rollback plan
+dbdiff current.sql desired.sql --direction down --emit rollback.sql
 ```
 
-### CI mode — exit 1 if schemas differ
+Review generated SQL before applying it. A rollback restores schema definitions; it cannot recover data lost through a dropped column or table.
+
+### Reports and offline snapshots
 
 ```bash
-dbdiff postgres://prod/myapp postgres://staging/myapp --ci
+dbdiff current.sql desired.sql --format json > drift.json
+dbdiff current.sql desired.sql --format yaml > drift.yml
+dbdiff current.sql desired.sql --format sql > migration.sql
+
+# Capture a database schema, then compare the snapshot offline
+dbdiff snapshot "$CURRENT_DSN" --out current.json
+dbdiff current.json desired.json
 ```
 
-Returns exit code `0` if schemas match, `1` if they differ. Use this in GitHub Actions, GitLab CI, or any pipeline.
+For connectivity checks, table listing, completions, PostgreSQL concurrent indexes, and configuration options, see the [CLI guide](doc/cli.md) or `dbdiff --help`.
 
-### Use a custom config file
+## Use it in CI
 
 ```bash
-dbdiff postgres://prod/myapp postgres://staging/myapp --config ./my-config.yml
+dbdiff current.sql desired.sql --ci --format json > drift-report.json
 ```
 
-### JSON output for custom tooling
+| Exit code | Meaning |
+| :---: | --- |
+| `0` | No schema drift (or successful comparison without `--ci`) |
+| `1` | Drift detected with `--ci` |
+| `2` | Invalid arguments, load/connection failure, or another error |
+| `3` | Blocking operations detected with `--ci --fail-on-blocking` |
 
-```bash
-dbdiff postgres://prod/myapp postgres://staging/myapp --format json
-```
+Use `--format ci` for a compact text report. `--format json` and `--format yaml` provide structured reports. Add `--fail-on-blocking` to distinguish changes classified as blocking by dbdiff.
 
----
-
-## GitHub Actions
-
-Add schema drift detection to every PR:
+A file-based GitHub Actions example, requiring no database secrets:
 
 ```yaml
-# .github/workflows/schema-check.yml
-name: Schema check
-
+name: Schema drift
 on: [pull_request]
-
+permissions:
+  contents: read
 jobs:
-  schema-drift:
+  schema:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install dbdiff
-        run: |
-          curl -sSL https://github.com/rekurt/dbdiff/releases/latest/download/dbdiff-x86_64-unknown-linux-musl.tar.gz | tar xz
-          sudo mv dbdiff /usr/local/bin/
-
-      - name: Check for schema drift
-        env:
-          PROD_DSN: ${{ secrets.PROD_DSN }}
-          STAGING_DSN: ${{ secrets.STAGING_DSN }}
-        run: dbdiff "$PROD_DSN" "$STAGING_DSN" --ci
+        run: cargo install --git https://github.com/rekurt/dbdiff --tag v0.2.1 --locked
+      - name: Compare schemas
+        run: dbdiff current.sql desired.sql --ci --format json > drift-report.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: schema-drift-report
+          path: drift-report.json
 ```
 
----
-
-## What dbdiff detects
-
-| Object         | Added | Removed | Modified |
-|----------------|:-----:|:-------:|:--------:|
-| Tables         | ✓     | ✓       | —        |
-| Columns        | ✓     | ✓       | ✓        |
-| Column types   | —     | —       | ✓        |
-| Indexes        | ✓     | ✓       | ✓        |
-| Unique constraints | ✓ | ✓       | —        |
-
-### Locking warnings
-
-Some ALTER operations lock the table on Postgres. `dbdiff` marks them explicitly:
-
-```
-⚠  ALTER TABLE orders ADD COLUMN paid_at timestamptz NOT NULL
-   This operation will rewrite the table and acquire AccessExclusiveLock.
-   Consider: ADD COLUMN ... DEFAULT NULL first, then backfill.
-```
-
----
+Replace `current.sql` and `desired.sql` with your project's schemas. For live comparisons, supply DSNs through CI secrets. When running under GitHub Actions, CI mode also emits annotations.
 
 ## Configuration
 
-Create `.dbdiff.yml` in your project root:
+Run `dbdiff init` to create `.dbdiff.yml`, or use `--config path/to/config.yml`:
 
 ```yaml
-# .dbdiff.yml
 ignore:
   tables:
     - _migrations
     - schema_version
   columns:
-    - "*.created_at"   # ignore created_at in all tables
-    - "sessions.*"     # ignore all columns in sessions table
+    - "*.created_at"
+    - "sessions.*"
+
+protected:
+  tables:
+    - payments
+  columns:
+    - "*.id"
 
 output:
-  format: pretty       # pretty | json | sql
+  format: pretty
   color: true
 ```
 
----
+Ignored objects are filtered from both sources. Protected rules reject drops of listed tables or matching columns. See [configuration details](doc/cli.md#configuration).
 
-## Supported databases
+## Capabilities and limits
 
-| Database        | Status     | Version |
-|-----------------|-----------|---------|
-| PostgreSQL      | ✅ stable  | 12+     |
-| MySQL / MariaDB | ✅ stable  | 8.0+    |
-| SQLite          | ✅ stable  | 3.x     |
+| Area | Coverage |
+| --- | --- |
+| Tables | Add, remove; experimental rename detection |
+| Columns | Add, remove, type/default/nullability changes; experimental renames |
+| Indexes | Add, remove, changed definitions |
+| Constraints | Primary keys, unique, foreign keys, checks |
+| PostgreSQL objects | Views, enums, sequences when available from live schemas or snapshots |
+| Migration plans | Forward, rollback, or both; warnings and optional explanations |
 
----
+- PostgreSQL, MySQL/MariaDB, and SQLite loaders are included by default. Backend-specific DDL has different capabilities; review each generated plan.
+- SQL files are parsed as schema definitions. Views, enums, and sequences are excluded from comparisons involving `.sql` files; use JSON snapshots to preserve those objects.
+- SQLite cannot perform every ALTER operation directly; generated plans can include warnings or unsupported-operation comments.
+- Rename detection is experimental and opt-in (`--detect-renames`).
+- Blocking classifications are review aids, not a guarantee about execution time, lock duration, or data preservation.
 
-## Feature flags
-
-Database backends are optional and can be toggled via Cargo features:
-
-```bash
-# Install with only PostgreSQL support
-cargo install dbdiff --no-default-features --features postgres
-
-# Install with PostgreSQL and SQLite only
-cargo install dbdiff --no-default-features --features postgres,sqlite
-```
-
-All backends (`postgres`, `mysql`, `sqlite`) are enabled by default.
-
----
-
-## Development
+## Development and community
 
 ```bash
-git clone https://github.com/rekurt/dbdiff
-cd dbdiff
-cargo build
-
-# Run tests
-cargo test
-
-# Run with local SQL files
-cargo run -- tests/fixtures/schema_a.sql --schema tests/fixtures/schema_b.sql
-
-# Run with a local Postgres
-docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=pass postgres:16
-cargo run -- postgres://postgres:pass@localhost/myapp --schema tests/fixtures/schema_b.sql
+cargo test --locked
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+python3 examples/demo/run.py --bin target/debug/dbdiff
 ```
 
-### Project layout
+[Contributing](CONTRIBUTING.md) · [Architecture](doc/architecture.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/rekurt/dbdiff/issues/new?template=bug_report.yml) · [Request a feature](https://github.com/rekurt/dbdiff/issues/new?template=feature_request.yml) · [Security policy](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
-```
-src/
-  main.rs          CLI entry point
-  lib.rs           Library root
-  cli.rs           Argument parsing (clap)
-  model.rs         Schema / Table / Column / Index structs
-  error.rs         Error types
-  diff.rs          Schema comparison engine
-  migration.rs     SQL migration generator
-  output.rs        Terminal rendering (colored diff)
-  config/
-    mod.rs         Config file parsing (.dbdiff.yml)
-    filter.rs      Schema filtering (ignore tables/columns)
-  loader/
-    mod.rs         Source dispatch logic
-    postgres.rs    PostgreSQL introspection
-    mysql.rs       MySQL / MariaDB introspection
-    sqlite.rs      SQLite introspection
-    sqlfile.rs     .sql file parser
-tests/
-  cli.rs           Integration tests
-  config.rs        Config integration tests
-  fixtures/        SQL test schemas + config fixtures
-```
-
----
-
-## Contributing
-
-Issues and PRs are welcome. Please open an issue before working on a large change.
-
-For a new database driver, see [`src/loader/postgres.rs`](src/loader/postgres.rs) — implement a `load` function returning `Schema` and add detection logic in `src/loader/mod.rs`.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full details.
-
----
-
-## License
-
-MIT © [Nikita](https://github.com/rekurt)
+MIT © [Nikita](https://github.com/rekurt). See [LICENSE](LICENSE).

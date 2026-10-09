@@ -1,59 +1,64 @@
 # Architecture
 
-This document describes the high-level architecture of dbdiff.
+[Back to README](../README.md) · [CLI guide](cli.md) · [Contributing](../CONTRIBUTING.md)
 
-## Overview
+## Comparison pipeline
 
+```mermaid
+flowchart LR
+    CLI[CLI arguments] --> Load[Load both schemas]
+    Load --> Filter[Apply ignore rules]
+    Filter --> Diff[Compare current and desired]
+    Diff --> Protect[Check protected objects]
+    Protect --> SQL[Generate forward and rollback SQL]
+    SQL --> Report[Render output and CI report]
+    Report --> File[Explicit file write]
+    Report --> Exit[CI exit status]
+    Sources[(Live databases / SQL / JSON)] --> Load
 ```
-┌─────────┐     ┌──────────┐     ┌──────────┐     ┌────────────┐     ┌──────────┐
-│  CLI     │────▶│ Loaders  │────▶│  Diff    │────▶│ Migration  │────▶│ Output   │
-│ (clap)   │     │          │     │  Engine  │     │ Generator  │     │          │
-└─────────┘     └──────────┘     └──────────┘     └────────────┘     └──────────┘
-                 │        │
-           ┌─────┘        └─────┐
-           ▼                    ▼
-    ┌────────────┐      ┌────────────┐
-    │ PostgreSQL │      │ SQL File   │
-    │ Loader     │      │ Parser     │
-    └────────────┘      └────────────┘
-```
 
-## Module Responsibilities
+The pipeline produces a plan. It does not execute the generated migration SQL against a database. `--emit` or `--out --write` saves the plan; `--ci` controls the final drift/blocking exit status.
 
-### `cli.rs`
-Defines the command-line interface using `clap`. Handles argument parsing and validation.
+## Module map
 
-### `model.rs`
-Core data structures: `Schema`, `Table`, `Column`, `Index`. These are the canonical representation that all other modules work with. Uses `BTreeMap` for deterministic ordering.
+| Module | Responsibility |
+| --- | --- |
+| [`src/main.rs`](../src/main.rs) | Dispatch commands |
+| [`src/cli.rs`](../src/cli.rs) | Parse arguments, apply profiles, normalize diff parameters |
+| [`src/commands/`](../src/commands/) | Orchestrate diff, snapshot, validate, tables, and init |
+| [`src/model.rs`](../src/model.rs) | Canonical schema model and JSON snapshots |
+| [`src/loader/`](../src/loader/) | Load PostgreSQL, MySQL/MariaDB, SQLite, SQL files, or snapshots |
+| [`src/config/`](../src/config/) | Read config and apply ignore rules |
+| [`src/diff.rs`](../src/diff.rs) | Compare schemas, including optional rename inference |
+| [`src/migration/`](../src/migration/) | Generate forward/rollback statements and dialect-specific SQL |
+| [`src/output.rs`](../src/output.rs) | Pretty output, explanations, SQL rendering |
+| [`src/ci.rs`](../src/ci.rs) | Structured reports, blocking classification, annotations, exit codes |
+| [`src/error.rs`](../src/error.rs) | Error representation and DSN sanitization helpers |
 
-### `loader/`
-Schema loading from different sources. Each loader converts a source into a `Schema`:
-- **`postgres.rs`** — Connects to a live PostgreSQL database and queries `information_schema` and `pg_indexes`
-- **`sqlfile.rs`** — Parses `.sql` files containing `CREATE TABLE` and `CREATE INDEX` statements
-- **`mod.rs`** — Dispatch logic that routes to the correct loader based on the source string
+## Schema model and sources
 
-### `diff.rs`
-Pure function `diff_schemas(left, right) -> SchemaDiff`. No I/O, no side effects. Compares two schemas and produces a structured diff with added/removed/modified tables, columns, and indexes.
+`Schema` stores tables, views, enums, and sequences. Tables contain columns, indexes, and constraints. `BTreeMap` collections provide deterministic ordering. Loaders convert supported sources into this common representation; database backends are Cargo features.
 
-### `migration.rs`
-Takes a `SchemaDiff` and generates ordered SQL statements. Handles statement ordering for safe execution (drops before creates, indexes after columns). Includes safety warnings for dangerous operations.
+The comparison engine produces a `SchemaDiff`, including added/removed objects, modified tables and columns, and optional rename candidates. SQL generation uses the selected backend dialect.
 
-### `output.rs`
-Terminal rendering with colored output. Also handles JSON and plain SQL output formats.
+A `.sql` file supplies the structure parsed from CREATE statements. The parser does not load views, enums, or sequences, so the diff command excludes these object categories when either side is a SQL file. JSON snapshots retain them and can be compared offline.
 
-### `error.rs`
-Unified error type `DbDiffError` with variants for each error source.
+Two SQL files or snapshots use PostgreSQL-style migration SQL. A live backend paired with a SQL file/snapshot selects that live backend's dialect. Mixed live backends are rejected.
 
-## Data Flow
+## Verification
 
-1. CLI parses arguments → determines source and target
-2. Loaders convert sources into `Schema` structs
-3. Diff engine compares the two schemas
-4. Migration generator produces SQL statements from the diff
-5. Output module renders results to terminal or file
+- Unit tests exercise parsing, the schema model, comparison, migration generation, reports, and configuration.
+- [`tests/`](../tests/) exercises CLI behavior, configuration, and constraints with checked-in fixtures.
+- [`examples/demo/run.py`](../examples/demo/run.py) verifies the public demo's JSON changes, CI exit codes, preview behavior, saved SQL, and rollback output.
 
-## Adding a New Database
+These checks run without live database credentials. Backend changes also need targeted manual checks against disposable databases for behavior that fixtures cannot represent.
 
-1. Create `src/loader/yourdb.rs` with a `pub async fn load(dsn: &str) -> Result<Schema, DbDiffError>`
-2. Add DSN pattern detection in `src/loader/mod.rs`
-3. The diff engine, migration generator, and output modules work unchanged — they operate on the abstract `Schema` model
+## Extending a backend
+
+1. Add a loader that produces the shared schema representation.
+2. Add source dispatch and Cargo feature gating.
+3. Implement the backend's SQL dialect, supported DDL, and warnings.
+4. Add loader, comparison, and migration tests relevant to that backend.
+5. Update capabilities and CLI examples to reflect the verified behavior.
+
+Do not assume a new backend can execute another backend's migration SQL unchanged.
