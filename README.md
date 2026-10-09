@@ -35,7 +35,7 @@ Most teams discover schema drift at the worst possible moment — right before a
 - **DSN vs DSN** or **DSN vs SQL file** — compare any two sources
 - **CI-native** — non-zero exit code on drift, structured output, GitHub Actions support
 - **Safe migrations** — warns about locking operations before you run them
-- **Multi-database** — Postgres today, MySQL and SQLite on the roadmap
+- **Multi-database** — PostgreSQL, MySQL/MariaDB and SQLite backends, enabled by default.
 
 ---
 
