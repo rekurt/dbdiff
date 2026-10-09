@@ -1,0 +1,15 @@
+$ dbdiff before.sql --schema after.sql
+~ table: users
+  + column  email                text
+    column  id                   [unchanged]
+    column  name                 [unchanged]
+  + index   idx_users_email ON users(email)
+
+
+Generated migration
+
+  ALTER TABLE users ADD COLUMN email text;
+  CREATE INDEX idx_users_email ON users(email);
+  !!  Consider using CREATE INDEX CONCURRENTLY to avoid locking the table.
+
+Summary: 1 table(s) modified (1 columns added, 1 indexes added)
