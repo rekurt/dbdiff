@@ -172,18 +172,14 @@ pub fn diff_schemas_with_options(
 
     // Detect table renames: match removed -> added by identical column sets
     if detect_renames {
-        let rename_pairs = detect_table_renames(
-            &mut removed_tables,
-            &mut added_tables,
-            &mut renamed_tables,
-        );
+        let rename_pairs =
+            detect_table_renames(&mut removed_tables, &mut added_tables, &mut renamed_tables);
 
         // Renamed tables may still differ in indexes/constraints — diff them
         // and emit modification entries under the new name so that migration
         // generation picks up these changes after the RENAME TABLE.
         for (old_table, new_table) in &rename_pairs {
-            let mut table_diff =
-                diff_tables(&new_table.name, old_table, new_table, detect_renames);
+            let mut table_diff = diff_tables(&new_table.name, old_table, new_table, detect_renames);
             // Rebase removed objects to the new table name so that DROP
             // statements generated after RENAME TABLE target the correct name.
             for idx in &mut table_diff.removed_indexes {
@@ -259,7 +255,11 @@ fn diff_tables(name: &str, left: &Table, right: &Table, detect_renames: bool) ->
 
     // Detect column renames before finalizing added/removed lists
     if detect_renames {
-        detect_column_renames(&mut removed_columns, &mut added_columns, &mut renamed_columns);
+        detect_column_renames(
+            &mut removed_columns,
+            &mut added_columns,
+            &mut renamed_columns,
+        );
     }
 
     for (col_name, left_col) in &left.columns {
@@ -1085,14 +1085,18 @@ mod tests {
     fn rename_detection_disabled_by_default() {
         let mut left = Schema::new();
         let mut t = Table::new("users");
-        t.columns
-            .insert("old_name".into(), make_column("old_name", "text", true, None));
+        t.columns.insert(
+            "old_name".into(),
+            make_column("old_name", "text", true, None),
+        );
         left.tables.insert("users".into(), t);
 
         let mut right = Schema::new();
         let mut t = Table::new("users");
-        t.columns
-            .insert("new_name".into(), make_column("new_name", "text", true, None));
+        t.columns.insert(
+            "new_name".into(),
+            make_column("new_name", "text", true, None),
+        );
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas(&left, &right);
@@ -1107,23 +1111,33 @@ mod tests {
         let mut t = Table::new("users");
         t.columns
             .insert("id".into(), make_column("id", "integer", false, None));
-        t.columns
-            .insert("email_addr".into(), make_column("email_addr", "varchar(255)", false, None));
+        t.columns.insert(
+            "email_addr".into(),
+            make_column("email_addr", "varchar(255)", false, None),
+        );
         left.tables.insert("users".into(), t);
 
         let mut right = Schema::new();
         let mut t = Table::new("users");
         t.columns
             .insert("id".into(), make_column("id", "integer", false, None));
-        t.columns
-            .insert("email".into(), make_column("email", "varchar(255)", false, None));
+        t.columns.insert(
+            "email".into(),
+            make_column("email", "varchar(255)", false, None),
+        );
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas_with_options(&left, &right, true);
         assert_eq!(diff.modified_tables[0].renamed_columns.len(), 1);
-        assert_eq!(diff.modified_tables[0].renamed_columns[0].old.name, "email_addr");
+        assert_eq!(
+            diff.modified_tables[0].renamed_columns[0].old.name,
+            "email_addr"
+        );
         assert_eq!(diff.modified_tables[0].renamed_columns[0].new.name, "email");
-        assert_eq!(diff.modified_tables[0].renamed_columns[0].confidence, RenameConfidence::High);
+        assert_eq!(
+            diff.modified_tables[0].renamed_columns[0].confidence,
+            RenameConfidence::High
+        );
         assert!(diff.modified_tables[0].added_columns.is_empty());
         assert!(diff.modified_tables[0].removed_columns.is_empty());
     }
@@ -1158,14 +1172,18 @@ mod tests {
     fn column_rename_not_detected_when_types_differ() {
         let mut left = Schema::new();
         let mut t = Table::new("users");
-        t.columns
-            .insert("old_col".into(), make_column("old_col", "integer", false, None));
+        t.columns.insert(
+            "old_col".into(),
+            make_column("old_col", "integer", false, None),
+        );
         left.tables.insert("users".into(), t);
 
         let mut right = Schema::new();
         let mut t = Table::new("users");
-        t.columns
-            .insert("new_col".into(), make_column("new_col", "text", false, None));
+        t.columns.insert(
+            "new_col".into(),
+            make_column("new_col", "text", false, None),
+        );
         right.tables.insert("users".into(), t);
 
         let diff = diff_schemas_with_options(&left, &right, true);

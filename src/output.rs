@@ -555,6 +555,24 @@ pub fn print_summary(diff: &SchemaDiff) {
     println!("{}", summary.bold());
 }
 
+/// Print a compact CI-friendly summary to stdout.
+pub fn print_ci_compact(report: &crate::ci::CiReport) {
+    let total = report.changes.len();
+    let blocking = report.blocking.len();
+    println!("CI summary: {}", report.summary);
+    println!("changes={total} blocking={blocking}");
+    for ch in report.changes.iter().take(5) {
+        let marker = if ch.is_blocking { "!" } else { "-" };
+        println!(
+            "{marker} {} {} {}",
+            ch.change_type, ch.object, ch.description
+        );
+    }
+    if total > 5 {
+        println!("... and {} more change(s)", total - 5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,23 +613,5 @@ mod tests {
         let sql = migration_to_sql(&[], true);
         assert!(sql.contains("BEGIN;"));
         assert!(sql.contains("COMMIT;"));
-    }
-}
-
-/// Print a compact CI-friendly summary to stdout.
-pub fn print_ci_compact(report: &crate::ci::CiReport) {
-    let total = report.changes.len();
-    let blocking = report.blocking.len();
-    println!("CI summary: {}", report.summary);
-    println!("changes={total} blocking={blocking}");
-    for ch in report.changes.iter().take(5) {
-        let marker = if ch.is_blocking { "!" } else { "-" };
-        println!(
-            "{marker} {} {} {}",
-            ch.change_type, ch.object, ch.description
-        );
-    }
-    if total > 5 {
-        println!("... and {} more change(s)", total - 5);
     }
 }

@@ -1,6 +1,6 @@
 # dbdiff
 
-[![Rust](https://img.shields.io/badge/rust-1.75+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/rekurt/dbdiff/ci.yml?style=flat-square&label=CI)](https://github.com/rekurt/dbdiff/actions)
 [![Release](https://img.shields.io/github/v/release/rekurt/dbdiff?style=flat-square)](https://github.com/rekurt/dbdiff/releases)

@@ -223,6 +223,8 @@ pub async fn load(dsn: &str) -> Result<Schema, DbDiffError> {
         );
     }
 
+    // Shutdown waits for borrowed connections to be returned to the pool.
+    drop(conn);
     pool.disconnect().await?;
     Ok(schema)
 }

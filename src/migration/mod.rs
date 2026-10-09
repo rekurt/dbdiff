@@ -33,7 +33,11 @@ pub struct MigrationStatement {
 /// 11. CREATE INDEXes
 /// 12. ADD CONSTRAINTs for modified tables
 /// 13. CREATE new VIEWs
-pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect, concurrently: bool) -> Vec<MigrationStatement> {
+pub fn generate_migration(
+    diff: &SchemaDiff,
+    dialect: SqlDialect,
+    concurrently: bool,
+) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
     // Phase 0: RENAME TABLEs (before any DROP/CREATE operations)
@@ -381,7 +385,11 @@ pub fn generate_migration(diff: &SchemaDiff, dialect: SqlDialect, concurrently: 
 /// recreate removed enums/sequences -> recreate removed tables ->
 /// re-add removed columns -> recreate removed constraints/indexes ->
 /// recreate removed views
-pub fn generate_rollback(diff: &SchemaDiff, dialect: SqlDialect, _concurrently: bool) -> Vec<MigrationStatement> {
+pub fn generate_rollback(
+    diff: &SchemaDiff,
+    dialect: SqlDialect,
+    _concurrently: bool,
+) -> Vec<MigrationStatement> {
     let mut statements = Vec::new();
 
     // 1. Drop views that were added
@@ -1446,9 +1454,9 @@ mod tests {
         let diff = diff_schemas(&left, &right);
         let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
-        assert!(stmts
-            .iter()
-            .any(|s| s.sql.contains("ADD CONSTRAINT orders_pkey PRIMARY KEY (id)")));
+        assert!(stmts.iter().any(|s| s
+            .sql
+            .contains("ADD CONSTRAINT orders_pkey PRIMARY KEY (id)")));
     }
 
     #[test]
@@ -1480,9 +1488,7 @@ mod tests {
         let diff = diff_schemas(&left, &right);
         let stmts = generate_migration(&diff, SqlDialect::MySql, false);
 
-        assert!(stmts
-            .iter()
-            .any(|s| s.sql.contains("DROP PRIMARY KEY")));
+        assert!(stmts.iter().any(|s| s.sql.contains("DROP PRIMARY KEY")));
     }
 
     // ── CONCURRENTLY tests ──
@@ -1519,8 +1525,14 @@ mod tests {
             "Expected CONCURRENTLY in: {}",
             stmts[0].sql
         );
-        assert!(!stmts[0].is_blocking, "CONCURRENTLY indexes should not be blocking");
-        assert!(stmts[0].warnings.is_empty(), "No 'Consider CONCURRENTLY' warning when already concurrent");
+        assert!(
+            !stmts[0].is_blocking,
+            "CONCURRENTLY indexes should not be blocking"
+        );
+        assert!(
+            stmts[0].warnings.is_empty(),
+            "No 'Consider CONCURRENTLY' warning when already concurrent"
+        );
     }
 
     #[test]
@@ -1546,7 +1558,10 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres, true);
 
         // New table indexes should NOT use CONCURRENTLY (table is empty)
-        let idx_stmt = stmts.iter().find(|s| s.sql.contains("CREATE") && s.sql.contains("INDEX")).unwrap();
+        let idx_stmt = stmts
+            .iter()
+            .find(|s| s.sql.contains("CREATE") && s.sql.contains("INDEX"))
+            .unwrap();
         assert!(
             !idx_stmt.sql.contains("CONCURRENTLY"),
             "New table indexes should not use CONCURRENTLY: {}",
@@ -1612,12 +1627,16 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert!(
-            stmts.iter().any(|s| s.sql.contains("RENAME COLUMN email_addr TO email")),
+            stmts
+                .iter()
+                .any(|s| s.sql.contains("RENAME COLUMN email_addr TO email")),
             "Expected RENAME COLUMN, got: {:?}",
             stmts.iter().map(|s| &s.sql).collect::<Vec<_>>()
         );
         // Should NOT have DROP + ADD for the renamed column
-        assert!(!stmts.iter().any(|s| s.sql.contains("DROP COLUMN email_addr")));
+        assert!(!stmts
+            .iter()
+            .any(|s| s.sql.contains("DROP COLUMN email_addr")));
         assert!(!stmts.iter().any(|s| s.sql.contains("ADD COLUMN email")));
     }
 
@@ -1645,12 +1664,16 @@ mod tests {
         let stmts = generate_migration(&diff, SqlDialect::Postgres, false);
 
         assert!(
-            stmts.iter().any(|s| s.sql.contains("RENAME TO audit_trail")),
+            stmts
+                .iter()
+                .any(|s| s.sql.contains("RENAME TO audit_trail")),
             "Expected RENAME TO, got: {:?}",
             stmts.iter().map(|s| &s.sql).collect::<Vec<_>>()
         );
         assert!(!stmts.iter().any(|s| s.sql.contains("DROP TABLE user_logs")));
-        assert!(!stmts.iter().any(|s| s.sql.contains("CREATE TABLE audit_trail")));
+        assert!(!stmts
+            .iter()
+            .any(|s| s.sql.contains("CREATE TABLE audit_trail")));
     }
 
     #[test]
@@ -1711,7 +1734,9 @@ mod tests {
         let rollback = generate_rollback(&diff, SqlDialect::Postgres, false);
 
         assert!(
-            rollback.iter().any(|s| s.sql.contains("RENAME COLUMN new_name TO old_name")),
+            rollback
+                .iter()
+                .any(|s| s.sql.contains("RENAME COLUMN new_name TO old_name")),
             "Rollback should reverse column rename, got: {:?}",
             rollback.iter().map(|s| &s.sql).collect::<Vec<_>>()
         );
