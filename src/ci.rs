@@ -98,18 +98,15 @@ impl CiReport {
 
         // Renamed tables
         for rename in &diff.renamed_tables {
-            let stmt = statements.iter().find(|s| {
-                s.sql.contains("RENAME") && s.sql.contains(&rename.old_name)
-            });
+            let stmt = statements
+                .iter()
+                .find(|s| s.sql.contains("RENAME") && s.sql.contains(&rename.old_name));
             changes.push(CiChange {
                 change_type: "RENAME".to_string(),
                 object: "TABLE".to_string(),
                 table: rename.old_name.clone(),
                 name: rename.new_name.clone(),
-                description: format!(
-                    "RENAME TABLE {} → {}",
-                    rename.old_name, rename.new_name
-                ),
+                description: format!("RENAME TABLE {} → {}", rename.old_name, rename.new_name),
                 is_blocking: false,
                 sql: stmt.map(|s| s.sql.clone()).unwrap_or_default(),
             });

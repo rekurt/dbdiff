@@ -2,7 +2,7 @@ name: Schema drift check
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
     paths:
       - "migrations/**"
@@ -10,6 +10,8 @@ on:
 
 jobs:
   schema-drift:
+    # Live checks need repository secrets; the public offline demo runs in CI.
+    if: ${{ vars.ENABLE_LIVE_SCHEMA_CHECK == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

@@ -2,7 +2,7 @@
 name = "dbdiff"
 version = "0.2.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 authors = ["rekurt"]
 description = "Compare database schemas, detect drift, and generate migrations"
 license = "MIT"
@@ -16,6 +16,8 @@ exclude = [
     "tests/fixtures/",
     "benches/",
     "doc/",
+    "examples/",
+    "scripts/",
     ".editorconfig",
     "deny.toml",
     "cliff.toml",
