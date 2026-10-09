@@ -43,6 +43,9 @@ jobs:
       - run: cargo build --locked
       - run: cargo test --locked
 
+      - name: Verify offline demo
+        run: python examples/demo/run.py --bin target/debug/dbdiff${{ runner.os == 'Windows' && '.exe' || '' }}
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">dbdiff</title>
+  <desc id="desc">Inspect schema drift. Review migration SQL. Gate CI. PostgreSQL, MySQL, and SQLite.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1220"/><stop offset="1" stop-color="#172940"/></linearGradient>
+    <linearGradient id="accent"><stop stop-color="#6ee7b7"/><stop offset="1" stop-color="#38bdf8"/></linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#334155" stroke-opacity=".22"/></pattern>
+  </defs>
+  <rect width="1200" height="320" rx="20" fill="url(#bg)"/>
+  <rect width="1200" height="320" rx="20" fill="url(#grid)"/>
+  <rect x="48" y="46" width="4" height="226" rx="2" fill="url(#accent)"/>
+  <g font-family="system-ui,-apple-system,Segoe UI,sans-serif">
+    <text x="76" y="75" font-size="13" font-weight="700" letter-spacing="3" fill="#6ee7b7">DATABASE SCHEMA DIFF</text>
+    <text x="72" y="156" font-size="80" font-weight="750" letter-spacing="-4" fill="#f1f5f9">dbdiff</text>
+    <text x="76" y="202" font-size="23" fill="#cbd5e1">Inspect drift. Review SQL. Gate CI.</text>
+    <g font-size="13" font-weight="600" fill="#cbd5e1">
+      <rect x="76" y="233" width="116" height="30" rx="15" fill="#203348"/><text x="95" y="253">PostgreSQL</text>
+      <rect x="202" y="233" width="95" height="30" rx="15" fill="#203348"/><text x="224" y="253">MySQL</text>
+      <rect x="307" y="233" width="91" height="30" rx="15" fill="#203348"/><text x="329" y="253">SQLite</text>
+    </g>
+    <g transform="translate(730 62)">
+      <rect width="368" height="195" rx="14" fill="#0b1220" stroke="#334155"/>
+      <circle cx="22" cy="22" r="4" fill="#fb7185"/><circle cx="37" cy="22" r="4" fill="#fbbf24"/><circle cx="52" cy="22" r="4" fill="#34d399"/>
+      <text x="22" y="67" font-family="monospace" font-size="16" fill="#94a3b8">current → desired</text>
+      <g font-family="monospace" font-size="17">
+        <text x="22" y="106" fill="#6ee7b7">+ column  paid_at</text>
+        <text x="22" y="137" fill="#fda4af">− column  payment_date</text>
+        <text x="22" y="168" fill="#7dd3fc">→ reviewed migration.sql</text>
+      </g>
+    </g>
+  </g>
+</svg>
