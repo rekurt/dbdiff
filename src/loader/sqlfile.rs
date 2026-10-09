@@ -226,8 +226,7 @@ fn parse_constraint(def: &str, table_name: &str) -> Option<Constraint> {
     }
 
     // PRIMARY KEY (col1, col2)
-    let pk_re =
-        Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)").ok()?;
+    let pk_re = Regex::new(r"(?i)(?:CONSTRAINT\s+(\w+)\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)").ok()?;
     if let Some(cap) = pk_re.captures(def) {
         let columns: Vec<String> = cap[2].split(',').map(|s| s.trim().to_string()).collect();
         let name = cap

@@ -3,6 +3,12 @@ name: Security Audit
 on:
   schedule:
     - cron: "0 0 * * 1" # Every Monday at midnight
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/audit.yml"
   push:
     paths:
       - "Cargo.lock"

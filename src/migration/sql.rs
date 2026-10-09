@@ -101,10 +101,7 @@ pub fn add_constraint_sql(c: &Constraint, dialect: SqlDialect) -> String {
             let cols: Vec<String> = columns.iter().map(|c| quote_ident(c, dialect)).collect();
             // MySQL does not accept named PRIMARY KEY in ADD CONSTRAINT
             if dialect == SqlDialect::MySql {
-                format!(
-                    "ALTER TABLE {table} ADD PRIMARY KEY ({});",
-                    cols.join(", ")
-                )
+                format!("ALTER TABLE {table} ADD PRIMARY KEY ({});", cols.join(", "))
             } else {
                 format!(
                     "ALTER TABLE {table} ADD CONSTRAINT {name} PRIMARY KEY ({});",
