@@ -60,6 +60,32 @@ jobs:
 
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  mysql-live:
+    name: MySQL pool shutdown
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: dbdiff-ci-test-only
+          MYSQL_DATABASE: dbdiff_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -pdbdiff-ci-test-only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - run: cargo test --locked --test mysql_live -- --ignored
+        env:
+          DBDIFF_MYSQL_TEST_DSN: mysql://root:dbdiff-ci-test-only@127.0.0.1:3306/dbdiff_test
+
   fmt:
     name: Formatting
     runs-on: ubuntu-latest
