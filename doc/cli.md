@@ -10,6 +10,8 @@ dbdiff diff [OPTIONS] SOURCE [TARGET]
 dbdiff SOURCE --schema FILE
 ```
 
+Specify either `TARGET` or `--schema FILE`. Combining them is an argument error.
+
 `SOURCE` is the current state; `TARGET` (or `--schema FILE`) is the desired state. The default `up` direction produces SQL to change current → desired. `down` produces the reverse schema plan. `both` includes labeled UP and DOWN sections; apply only the intended section.
 
 | Source | Example |

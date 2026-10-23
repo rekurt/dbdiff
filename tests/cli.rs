@@ -613,3 +613,45 @@ fn next_steps_do_not_echo_source_paths() {
         .stderr(predicate::str::contains("private-source").not())
         .stderr(predicate::str::contains("private-target").not());
 }
+
+#[test]
+fn target_and_schema_are_mutually_exclusive() {
+    for subcommand in [false, true] {
+        let mut command = cmd();
+        if subcommand {
+            command.arg("diff");
+        }
+        command
+            .args([
+                "missing-source.sql",
+                "missing-target.sql",
+                "--schema",
+                "missing-schema.sql",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("cannot be used with"))
+            .stderr(predicate::str::contains("--schema"))
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+#[test]
+fn either_target_form_works_with_both_cli_forms() {
+    for subcommand in [false, true] {
+        for schema_flag in [false, true] {
+            let mut command = cmd();
+            if subcommand {
+                command.arg("diff");
+            }
+            command.arg("tests/fixtures/schema_a.sql");
+            if schema_flag {
+                command.arg("--schema");
+            }
+            command
+                .args(["tests/fixtures/schema_a.sql", "--ci"])
+                .assert()
+                .success();
+        }
+    }
+}

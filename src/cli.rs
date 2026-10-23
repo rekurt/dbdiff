@@ -28,7 +28,7 @@ pub struct Cli {
     pub target: Option<String>,
 
     /// Path to a .sql schema file to compare against (instead of a second DSN)
-    #[arg(long = "schema", value_name = "FILE")]
+    #[arg(long = "schema", value_name = "FILE", conflicts_with = "target")]
     pub schema_file: Option<String>,
 
     /// Write generated migration SQL to a file
@@ -188,7 +188,7 @@ pub struct DiffArgs {
     pub target: Option<String>,
 
     /// Path to a .sql schema file to compare against (instead of a second DSN)
-    #[arg(long = "schema", value_name = "FILE")]
+    #[arg(long = "schema", value_name = "FILE", conflicts_with = "target")]
     pub schema_file: Option<String>,
 
     /// Write generated migration SQL to a file
