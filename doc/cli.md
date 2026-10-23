@@ -73,6 +73,8 @@ dbdiff init
 dbdiff current.sql desired.sql --config custom.yml
 ```
 
+`dbdiff init` creates `.dbdiff.yml` only if the path does not exist. Existing files and symbolic links, including dangling links, are never overwritten.
+
 By default, dbdiff reads `.dbdiff.yml` in the working directory. A missing file uses defaults. A present but invalid file returns an error. CLI format options override configured output format.
 
 ```yaml
