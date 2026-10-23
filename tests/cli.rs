@@ -655,3 +655,49 @@ fn either_target_form_works_with_both_cli_forms() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_dangling_config_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("missing-config.yml");
+    let config = dir.path().join(".dbdiff.yml");
+    std::os::unix::fs::symlink(&target, &config).unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("already exists"));
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(config)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn concurrent_init_creates_config_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let children: Vec<_> = (0..8)
+        .map(|_| {
+            std::process::Command::new(assert_cmd::cargo::cargo_bin("dbdiff"))
+                .current_dir(dir.path())
+                .arg("init")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let codes: Vec<_> = children
+        .into_iter()
+        .map(|mut child| child.wait().unwrap().code().unwrap())
+        .collect();
+    assert_eq!(codes.iter().filter(|&&code| code == 0).count(), 1);
+    assert_eq!(codes.iter().filter(|&&code| code == 2).count(), 7);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".dbdiff.yml")).unwrap(),
+        dbdiff::config::DEFAULT_CONFIG_TEMPLATE
+    );
+}
