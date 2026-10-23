@@ -58,7 +58,7 @@ The report includes equality, a summary, changes, and blocking classifications. 
 | `--no-transaction` | Omit BEGIN/COMMIT wrapping in SQL output |
 | `--concurrently` | PostgreSQL CREATE INDEX CONCURRENTLY; implies no transaction wrapping |
 | `--detect-renames` | Experimental table/column rename inference |
-| `--profile dev\|ci\|safe-migrate` | Presets for common workflows; see `dbdiff --help` |
+| `--profile dev\|ci\|safe-migrate` | `dev`: defaults; `ci`: CI exit codes; `safe-migrate`: plan only, CI exit codes, fail on blocking changes |
 
 `--force` can insert **TRUNCATE TABLE** when PostgreSQL duplicate data would prevent creation of a unique index. It is deliberately excluded from the demo; inspect the generated SQL and its data-loss implications before using it.
 

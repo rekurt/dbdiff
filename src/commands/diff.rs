@@ -23,10 +23,7 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
 
     if params.fail_on_blocking && !params.ci {
         eprintln!("Error: --fail-on-blocking requires --ci.");
-        eprintln!(
-            "Try: dbdiff {} {} --ci --fail-on-blocking",
-            params.source, params.target_source
-        );
+        eprintln!("Try: dbdiff <SOURCE> <TARGET> --ci --fail-on-blocking");
         return Err(ExitCode::from(2));
     }
 
@@ -379,19 +376,10 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
     if matches!(format, OutputFormat::Pretty) && !params.ci {
         eprintln!("\nNext steps:");
         if params.out.is_none() {
-            eprintln!(
-                "  • Save migration: dbdiff {} {} --emit migration.sql",
-                params.source, params.target_source
-            );
+            eprintln!("  • Save migration: dbdiff <SOURCE> <TARGET> --emit migration.sql");
         }
-        eprintln!(
-            "  • CI gate:        dbdiff {} {} --ci",
-            params.source, params.target_source
-        );
-        eprintln!(
-            "  • Strict CI:      dbdiff {} {} --ci --fail-on-blocking",
-            params.source, params.target_source
-        );
+        eprintln!("  • CI gate:        dbdiff <SOURCE> <TARGET> --ci");
+        eprintln!("  • Strict CI:      dbdiff <SOURCE> <TARGET> --ci --fail-on-blocking");
     }
 
     if params.ci && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
