@@ -387,6 +387,7 @@ impl Cli {
                             ci = true;
                         }
                         RunProfile::SafeMigrate => {
+                            ci = true;
                             dry_run = true;
                             fail_on_blocking = true;
                         }
@@ -450,6 +451,7 @@ impl DiffArgs {
                 RunProfile::Dev => {}
                 RunProfile::Ci => ci = true,
                 RunProfile::SafeMigrate => {
+                    ci = true;
                     dry_run = true;
                     fail_on_blocking = true;
                 }
