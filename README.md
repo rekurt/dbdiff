@@ -190,7 +190,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dbdiff
-        run: cargo install --git https://github.com/rekurt/dbdiff --tag v0.2.1 --locked
+        run: cargo install --git https://github.com/rekurt/dbdiff --tag v0.2.2 --locked
       - name: Compare schemas
         run: dbdiff current.sql desired.sql --ci --format json > drift-report.json
       - name: Upload report

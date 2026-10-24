@@ -506,6 +506,7 @@ impl DiffParams {
                 "json" => OutputFormat::Json,
                 "yaml" => OutputFormat::Yaml,
                 "sql" => OutputFormat::Sql,
+                "ci" => OutputFormat::Ci,
                 _ => OutputFormat::Pretty,
             }
         } else {

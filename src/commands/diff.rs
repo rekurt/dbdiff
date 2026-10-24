@@ -82,7 +82,7 @@ pub async fn run_diff(params: DiffParams) -> Result<(), ExitCode> {
         left.schema.sequences.clear();
     }
 
-    if let Some(false) = cfg.output.color {
+    if matches!(params.color, dbdiff::cli::ColorMode::Auto) && cfg.output.color == Some(false) {
         colored::control::set_override(false);
     }
 
