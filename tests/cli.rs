@@ -534,3 +534,170 @@ fn ci_compact_output_format() {
         .success()
         .stdout(predicate::str::contains("CI summary:"));
 }
+
+#[test]
+fn safe_migrate_enables_ci_without_writing_files() {
+    let schemas = tempfile::tempdir().unwrap();
+    let nonblocking = schemas.path().join("nonblocking.sql");
+    let mut sql = std::fs::read_to_string("tests/fixtures/schema_a.sql").unwrap();
+    sql.push_str("\nCREATE TABLE audit_log (id integer);\n");
+    std::fs::write(&nonblocking, sql).unwrap();
+    for subcommand in [false, true] {
+        for (target, expected_code) in [
+            ("tests/fixtures/schema_a.sql", 0),
+            ("tests/fixtures/schema_b.sql", 3),
+            (nonblocking.to_str().unwrap(), 1),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("migration.sql");
+            std::fs::write(&out, "keep existing migration").unwrap();
+            let mut command = cmd();
+            if subcommand {
+                command.arg("diff");
+            }
+            command
+                .args([
+                    "tests/fixtures/schema_a.sql",
+                    target,
+                    "--profile",
+                    "safe-migrate",
+                    "--emit",
+                ])
+                .arg(&out)
+                .assert()
+                .code(expected_code)
+                .stderr(predicate::str::contains("requires --ci").not());
+            assert_eq!(
+                std::fs::read_to_string(out).unwrap(),
+                "keep existing migration"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_ci_flags_do_not_echo_dsn_credentials() {
+    for subcommand in [false, true] {
+        let mut command = cmd();
+        if subcommand {
+            command.arg("diff");
+        }
+        command
+            .args([
+                "postgres://alice:source-secret@localhost/source",
+                "mysql://bob:target-secret@localhost/target",
+                "--fail-on-blocking",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("requires --ci"))
+            .stderr(predicate::str::contains("source-secret").not())
+            .stderr(predicate::str::contains("target-secret").not());
+    }
+}
+
+#[test]
+fn next_steps_do_not_echo_source_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("private-source.sql");
+    let target = dir.path().join("private-target.sql");
+    for path in [&source, &target] {
+        std::fs::write(path, "CREATE TABLE users (id integer);").unwrap();
+    }
+    cmd()
+        .arg(source)
+        .arg(target)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("dbdiff <SOURCE> <TARGET> --ci"))
+        .stderr(predicate::str::contains("private-source").not())
+        .stderr(predicate::str::contains("private-target").not());
+}
+
+#[test]
+fn target_and_schema_are_mutually_exclusive() {
+    for subcommand in [false, true] {
+        let mut command = cmd();
+        if subcommand {
+            command.arg("diff");
+        }
+        command
+            .args([
+                "missing-source.sql",
+                "missing-target.sql",
+                "--schema",
+                "missing-schema.sql",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("cannot be used with"))
+            .stderr(predicate::str::contains("--schema"))
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+#[test]
+fn either_target_form_works_with_both_cli_forms() {
+    for subcommand in [false, true] {
+        for schema_flag in [false, true] {
+            let mut command = cmd();
+            if subcommand {
+                command.arg("diff");
+            }
+            command.arg("tests/fixtures/schema_a.sql");
+            if schema_flag {
+                command.arg("--schema");
+            }
+            command
+                .args(["tests/fixtures/schema_a.sql", "--ci"])
+                .assert()
+                .success();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_dangling_config_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("missing-config.yml");
+    let config = dir.path().join(".dbdiff.yml");
+    std::os::unix::fs::symlink(&target, &config).unwrap();
+    cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("already exists"));
+    assert!(!target.exists());
+    assert!(std::fs::symlink_metadata(config)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn concurrent_init_creates_config_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let children: Vec<_> = (0..8)
+        .map(|_| {
+            std::process::Command::new(assert_cmd::cargo::cargo_bin("dbdiff"))
+                .current_dir(dir.path())
+                .arg("init")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let codes: Vec<_> = children
+        .into_iter()
+        .map(|mut child| child.wait().unwrap().code().unwrap())
+        .collect();
+    assert_eq!(codes.iter().filter(|&&code| code == 0).count(), 1);
+    assert_eq!(codes.iter().filter(|&&code| code == 2).count(), 7);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".dbdiff.yml")).unwrap(),
+        dbdiff::config::DEFAULT_CONFIG_TEMPLATE
+    );
+}

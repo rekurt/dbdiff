@@ -66,7 +66,7 @@ pub struct IgnoreConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
-    /// Output format: `pretty`, `json`, or `sql`.
+    /// Output format: `pretty`, `json`, `yaml`, `ci`, or `sql`.
     pub format: Option<String>,
     /// Whether to use colored output.
     pub color: Option<bool>,
