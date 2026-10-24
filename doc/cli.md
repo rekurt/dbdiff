@@ -10,6 +10,8 @@ dbdiff diff [OPTIONS] SOURCE [TARGET]
 dbdiff SOURCE --schema FILE
 ```
 
+Specify either `TARGET` or `--schema FILE`. Combining them is an argument error.
+
 `SOURCE` is the current state; `TARGET` (or `--schema FILE`) is the desired state. The default `up` direction produces SQL to change current → desired. `down` produces the reverse schema plan. `both` includes labeled UP and DOWN sections; apply only the intended section.
 
 | Source | Example |
@@ -58,7 +60,7 @@ The report includes equality, a summary, changes, and blocking classifications. 
 | `--no-transaction` | Omit BEGIN/COMMIT wrapping in SQL output |
 | `--concurrently` | PostgreSQL CREATE INDEX CONCURRENTLY; implies no transaction wrapping |
 | `--detect-renames` | Experimental table/column rename inference |
-| `--profile dev\|ci\|safe-migrate` | Presets for common workflows; see `dbdiff --help` |
+| `--profile dev\|ci\|safe-migrate` | `dev`: defaults; `ci`: CI exit codes; `safe-migrate`: plan only, CI exit codes, fail on blocking changes |
 
 `--force` can insert **TRUNCATE TABLE** when PostgreSQL duplicate data would prevent creation of a unique index. It is deliberately excluded from the demo; inspect the generated SQL and its data-loss implications before using it.
 
@@ -71,7 +73,9 @@ dbdiff init
 dbdiff current.sql desired.sql --config custom.yml
 ```
 
-By default, dbdiff reads `.dbdiff.yml` in the working directory. A missing file uses defaults. A present but invalid file returns an error. CLI format options override configured output format.
+`dbdiff init` creates `.dbdiff.yml` only if the path does not exist. Existing files and symbolic links, including dangling links, are never overwritten.
+
+By default, dbdiff reads `.dbdiff.yml` in the working directory. A missing file uses defaults. A present but invalid file returns an error. CLI format options override configured output format, including `output.format: ci`. Explicit `--color always` and `--color never` override the config; `auto` keeps terminal detection and honors `output.color: false`.
 
 ```yaml
 ignore:

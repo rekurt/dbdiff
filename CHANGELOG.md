@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-24
+
+### Fixed
+
+- Update ctutils to 0.4.4 and Tokio to 1.53.3 for RustSec fixes.
+- Honor the configured CI report format and explicit CLI color mode.
+- Enable CI exit codes in safe-migrate while preserving plan-only behavior.
+- Keep database credentials out of command hints.
+- Reject simultaneous TARGET and --schema inputs.
+- Create config files atomically without overwriting existing paths or following dangling symlinks.
+
 ## [0.2.0] - 2026-04-06
 
 ### Added
