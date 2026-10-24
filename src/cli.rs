@@ -28,7 +28,7 @@ pub struct Cli {
     pub target: Option<String>,
 
     /// Path to a .sql schema file to compare against (instead of a second DSN)
-    #[arg(long = "schema", value_name = "FILE")]
+    #[arg(long = "schema", value_name = "FILE", conflicts_with = "target")]
     pub schema_file: Option<String>,
 
     /// Write generated migration SQL to a file
@@ -188,7 +188,7 @@ pub struct DiffArgs {
     pub target: Option<String>,
 
     /// Path to a .sql schema file to compare against (instead of a second DSN)
-    #[arg(long = "schema", value_name = "FILE")]
+    #[arg(long = "schema", value_name = "FILE", conflicts_with = "target")]
     pub schema_file: Option<String>,
 
     /// Write generated migration SQL to a file
@@ -387,6 +387,7 @@ impl Cli {
                             ci = true;
                         }
                         RunProfile::SafeMigrate => {
+                            ci = true;
                             dry_run = true;
                             fail_on_blocking = true;
                         }
@@ -450,6 +451,7 @@ impl DiffArgs {
                 RunProfile::Dev => {}
                 RunProfile::Ci => ci = true,
                 RunProfile::SafeMigrate => {
+                    ci = true;
                     dry_run = true;
                     fail_on_blocking = true;
                 }
@@ -504,6 +506,7 @@ impl DiffParams {
                 "json" => OutputFormat::Json,
                 "yaml" => OutputFormat::Yaml,
                 "sql" => OutputFormat::Sql,
+                "ci" => OutputFormat::Ci,
                 _ => OutputFormat::Pretty,
             }
         } else {
