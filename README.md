@@ -248,6 +248,14 @@ Ignored objects are filtered from both sources. Protected rules reject drops of 
 
 ## Development and community
 
+The repository is maintained by [@rekurt](https://github.com/rekurt).
+Use [issues](https://github.com/rekurt/dbdiff/issues) for reproducible bugs,
+feature proposals, and public support discussions. Follow
+[CONTRIBUTING.md](CONTRIBUTING.md) to submit focused pull requests against
+`master`; check [open pull requests](https://github.com/rekurt/dbdiff/pulls)
+before starting overlapping work. Share minimal synthetic schemas and redact
+connection credentials.
+
 ```bash
 cargo test --locked
 cargo fmt --all -- --check
@@ -256,5 +264,28 @@ python3 examples/demo/run.py --bin target/debug/dbdiff
 ```
 
 [Contributing](CONTRIBUTING.md) · [Architecture](doc/architecture.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/rekurt/dbdiff/issues/new?template=bug_report.yml) · [Request a feature](https://github.com/rekurt/dbdiff/issues/new?template=feature_request.yml) · [Security policy](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md)
+
+## Roadmap and support needs
+
+These contribution opportunities address gaps in the current implementation
+and verification. They are candidates for discussion, not release commitments
+or features already available; no delivery dates are assigned.
+
+| Task | Current evidence | Useful outcome |
+| --- | --- | --- |
+| Improve SQL-file object coverage | The [SQL loader](src/loader/sqlfile.rs) parses tables/indexes; the [diff command](src/commands/diff.rs) excludes views, enums, and sequences when a source is SQL. | Add parser fixtures and object handling before removing those exclusions; keep the documented limits until supported. |
+| Expand live-backend regression coverage | [CI](.github/workflows/ci.yml) includes a focused [MySQL pool-shutdown test](tests/mysql_live.rs). The [PostgreSQL loader](src/loader/postgres.rs) also needs verification against a running disposable database. | Add repeatable PostgreSQL loader/snapshot checks with synthetic schemas, recording server versions and expected diffs. |
+| Make SQLite migration limits easier to evaluate | The [SQL generator](src/migration/sql.rs) emits comments or warnings for unsupported constraint and column alterations. | Add small before/after examples with assertions for the emitted warnings, showing which changes need a separately reviewed table rebuild. |
+
+Useful in-kind support would provide disposable database environments for
+backend compatibility checks and documentation tooling for maintaining
+reproducible CLI examples. Expected public outputs would be test fixtures,
+regression tests, and clearer capability documentation. Test environments
+should contain synthetic data. dbdiff's role remains comparison and SQL
+generation; it does not apply migrations automatically.
+
+Support proposals can be discussed through the public issue tracker without
+posting private account details or credentials. Resource availability and
+funded scope for these tasks remain unconfirmed.
 
 MIT © [Nikita](https://github.com/rekurt). See [LICENSE](LICENSE).
