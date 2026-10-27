@@ -277,6 +277,9 @@ or features already available; no delivery dates are assigned.
 | Expand live-backend regression coverage | [CI](.github/workflows/ci.yml) includes a focused [MySQL pool-shutdown test](tests/mysql_live.rs). The [PostgreSQL loader](src/loader/postgres.rs) also needs verification against a running disposable database. | Add repeatable PostgreSQL loader/snapshot checks with synthetic schemas, recording server versions and expected diffs. |
 | Make SQLite migration limits easier to evaluate | The [SQL generator](src/migration/sql.rs) emits comments or warnings for unsupported constraint and column alterations. | Add small before/after examples with assertions for the emitted warnings, showing which changes need a separately reviewed table rebuild. |
 
+See the [proposed grant work packages](doc/GRANT_WORK_PACKAGES.md) for
+acceptance criteria and the evidence needed to review each deliverable.
+
 Useful in-kind support would provide disposable database environments for
 backend compatibility checks and documentation tooling for maintaining
 reproducible CLI examples. Expected public outputs would be test fixtures,
